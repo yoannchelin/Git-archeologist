@@ -61,6 +61,11 @@ func (s *Server) Register(srv *mcp.Server) {
 		Name:        "architecture_overview",
 		Description: "Top-down view of the repo: package list with sizes, top-level dependencies, and the files with the most git churn (likely critical zones).",
 	}, s.handleOverview)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "diagram",
+		Description: "Generate a Mermaid diagram of the call graph around a symbol (kind=call_graph), or the package-level dependency graph (kind=package_deps). The diagram renders inline in Claude Desktop and most MCP clients.",
+	}, s.handleDiagram)
 }
 
 // --- tool: query -------------------------------------------------------------

@@ -75,9 +75,9 @@ testdata/sample/    Petit repo Go (payment.go) pour les tests
 
 ---
 
-## 5. Les 5 outils MCP exposés
+## 5. Les 6 outils MCP exposés
 
-Définis dans `internal/mcpserver/server.go`. Si tu en ajoutes un, **résiste à la prolifération** — la valeur vient de ces 5 qui couvrent le cycle d'onboarding.
+Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`. Si tu en ajoutes un, **résiste à la prolifération** — la valeur vient de ces 6 qui couvrent le cycle d'onboarding.
 
 | Tool | Quand l'utiliser |
 |---|---|
@@ -86,12 +86,13 @@ Définis dans `internal/mcpserver/server.go`. Si tu en ajoutes un, **résiste à
 | `explain_symbol` | Deep dive sur un symbole : signature, doc, callers, callees, implémentations. |
 | `where_to_add` | "Où ajouter X ?" → fichiers candidats. |
 | `architecture_overview` | Vue top-down : packages + hot files. |
+| `diagram` | Diagramme Mermaid du call graph autour d'un symbole (`kind=call_graph`) ou des dépendances inter-packages (`kind=package_deps`). Rendu inline dans Claude Desktop. |
 
 ---
 
 ## 6. État actuel — ce qui marche, ce qui manque
 
-### ✅ Implémenté et cohérent
+### ✅ Implémenté et testé en exécution
 - Schéma SQLite complet avec FTS5 + triggers de sync
 - Parser Go avec call graph et impl edges (interfaces)
 - Ingest Git avec churn par fichier
@@ -100,16 +101,14 @@ Définis dans `internal/mcpserver/server.go`. Si tu en ajoutes un, **résiste à
 - Retrieval hybride (vector + FTS + graph)
 - Orchestrateur d'indexation
 - CLI `archaeo` (index / info / query)
-- Serveur MCP stdio avec les 5 tools
-- Smoke test sur `testdata/sample/payment.go`
-- README + Makefile
-
-### ⚠️ Non testé en exécution
-**Le code n'a jamais été compilé** dans la session de création — pas de Go dans l'environnement. Premier travail à faire : `go mod tidy && make test`. S'attendre à 1-3 petits bugs de compilation au premier passage (typos, imports manquants).
+- Serveur MCP stdio avec les 6 tools (dont `diagram`)
+- Outil `diagram` : call graph Mermaid + package deps — testé via JSON-RPC stdio
+- Smoke test sur `testdata/sample/payment.go` (`make test` passe)
+- README + Makefile (avec `-tags fts5`)
 
 ### ❌ À faire (ordre = ROI décroissant)
 
-1. **Génération de diagrammes Mermaid** (~150 LOC, 1/2 journée) — 6e outil MCP `diagram` : prend un symbole + une profondeur, sort un graphe Mermaid (call graph ou deps de package). Démo *waouh*. Le client MCP rend déjà Mermaid.
+1. ~~**Génération de diagrammes Mermaid**~~ — **FAIT** (`internal/mcpserver/diagram.go`)
 
 2. **Indexation incrémentale via `fsnotify`** (1 journée) — détecter les modifs de fichiers `.go`, ré-parser le seul package touché, mettre à jour symboles + edges entrants/sortants. Essentiel dès qu'on dépasse la démo.
 
