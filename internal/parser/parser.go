@@ -453,6 +453,160 @@ func isGenerated(file *ast.File) bool {
 	return false
 }
 
+// ParsePackage re-indexes a single Go package identified by its import path.
+//
+// Unlike Parse (which walks ./...), this loads only the requested package
+// (plus its transitive deps for type resolution) and updates only that
+// package's files and symbols. Incoming call edges from other packages are
+// left untouched; outgoing intra-package call edges are regenerated.
+//
+// Cross-package call edges from this package to others are not regenerated
+// here — they will be correct after a full `Parse` run. For day-to-day
+// incremental updates (function bodies, signatures, docs) this is fine.
+func ParsePackage(repoRoot, pkgPath string, s *store.Store) (*Stats, error) {
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+			packages.NeedImports | packages.NeedTypes | packages.NeedSyntax |
+			packages.NeedTypesInfo | packages.NeedDeps,
+		Dir:   repoRoot,
+		Tests: false,
+	}
+	pkgs, err := packages.Load(cfg, pkgPath)
+	if err != nil {
+		return nil, fmt.Errorf("packages.Load %s: %w", pkgPath, err)
+	}
+
+	var target *packages.Package
+	for _, p := range pkgs {
+		if p.PkgPath == pkgPath {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		return nil, fmt.Errorf("package %q not found after load", pkgPath)
+	}
+
+	stats := &Stats{}
+	symIDs := make(map[types.Object]int64)
+	fileIDs := make(map[string]int64)
+
+	batch, err := s.Begin()
+	if err != nil {
+		return nil, err
+	}
+
+	// Pass 1: package symbol + file rows.
+	stats.Packages++
+	pkgSymID, err := batch.PutSymbol(store.Symbol{
+		Kind: "package", Name: target.Name, Qualified: target.PkgPath, Exported: true,
+	})
+	if err != nil {
+		_ = batch.Rollback()
+		return nil, fmt.Errorf("put package symbol: %w", err)
+	}
+	for _, file := range target.Syntax {
+		pos := target.Fset.Position(file.Pos())
+		absPath := pos.Filename
+		relPath := relTo(repoRoot, absPath)
+		loc := target.Fset.Position(file.End()).Line
+		fid, err := batch.PutFile(store.File{
+			Path:        relPath,
+			Package:     target.PkgPath,
+			LOC:         loc,
+			IsTest:      strings.HasSuffix(relPath, "_test.go"),
+			IsGenerated: isGenerated(file),
+		})
+		if err != nil {
+			_ = batch.Rollback()
+			return nil, fmt.Errorf("put file %s: %w", relPath, err)
+		}
+		fileIDs[absPath] = fid
+		stats.Files++
+		fileSymID, err := batch.PutSymbol(store.Symbol{
+			Kind: "file", Name: filepath.Base(relPath), Qualified: relPath,
+			FileID: fid, LineEnd: loc, Exported: true,
+		})
+		if err != nil {
+			_ = batch.Rollback()
+			return nil, err
+		}
+		if err := batch.PutEdge(store.Edge{Src: pkgSymID, Dst: fileSymID, Relation: "contains", Weight: 1}); err != nil {
+			_ = batch.Rollback()
+			return nil, err
+		}
+	}
+
+	// Pass 1b: top-level declarations.
+	if target.TypesInfo != nil {
+		for _, file := range target.Syntax {
+			absPath := target.Fset.Position(file.Pos()).Filename
+			fid := fileIDs[absPath]
+			for _, decl := range file.Decls {
+				switch d := decl.(type) {
+				case *ast.FuncDecl:
+					id, err := emitFunc(batch, target, d, fid)
+					if err != nil {
+						_ = batch.Rollback()
+						return nil, err
+					}
+					if obj := target.TypesInfo.Defs[d.Name]; obj != nil {
+						symIDs[obj] = id
+					}
+					stats.Symbols++
+				case *ast.GenDecl:
+					if err := emitGenDecl(batch, target, d, fid, symIDs, &stats.Symbols); err != nil {
+						_ = batch.Rollback()
+						return nil, err
+					}
+				}
+			}
+		}
+	}
+
+	if err := batch.Commit(); err != nil {
+		return nil, fmt.Errorf("commit pass 1: %w", err)
+	}
+
+	// Pass 2: intra-package call edges only.
+	// Cross-package callees aren't in symIDs so they are silently skipped.
+	batch, err = s.Begin()
+	if err != nil {
+		return nil, err
+	}
+	if target.TypesInfo != nil {
+		for _, file := range target.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				callee := resolveCallee(call.Fun, target.TypesInfo)
+				if callee == nil {
+					return true
+				}
+				caller := enclosingFunc(file, call.Pos(), target.TypesInfo)
+				if caller == nil {
+					return true
+				}
+				srcID, okSrc := symIDs[caller]
+				dstID, okDst := symIDs[callee]
+				if !okSrc || !okDst {
+					return true
+				}
+				if err := batch.PutEdge(store.Edge{Src: srcID, Dst: dstID, Relation: "calls", Weight: 1}); err == nil {
+					stats.CallEdges++
+				}
+				return true
+			})
+		}
+	}
+	if err := batch.Commit(); err != nil {
+		return nil, fmt.Errorf("commit pass 2: %w", err)
+	}
+	return stats, nil
+}
+
 // relTo returns p relative to base, falling back to p if relativization fails.
 func relTo(base, p string) string {
 	r, err := filepath.Rel(base, p)

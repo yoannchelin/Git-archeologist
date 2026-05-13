@@ -215,6 +215,35 @@ func (b *BatchInsert) Rollback() error {
 	return b.tx.Rollback()
 }
 
+// --- Incremental update ------------------------------------------------------
+
+// DeletePackageData removes all symbols and edges touching a Go package.
+// Both src and dst edges are deleted before symbols to satisfy FK constraints.
+// Embeddings cascade via the FK ON DELETE CASCADE; FTS via the AFTER DELETE trigger.
+func (s *Store) DeletePackageData(pkgPath string) error {
+	// Delete any edge that references a symbol in this package, whether as
+	// caller (src) or callee (dst). Must come before symbol deletion.
+	if _, err := s.db.Exec(`
+		DELETE FROM edges WHERE src IN (
+			SELECT sym.id FROM symbols sym
+			JOIN files f ON f.id = sym.file_id
+			WHERE f.package = ?
+		) OR dst IN (
+			SELECT sym.id FROM symbols sym
+			JOIN files f ON f.id = sym.file_id
+			WHERE f.package = ?
+		)`, pkgPath, pkgPath); err != nil {
+		return fmt.Errorf("delete edges: %w", err)
+	}
+	if _, err := s.db.Exec(`
+		DELETE FROM symbols WHERE file_id IN (
+			SELECT id FROM files WHERE package = ?
+		)`, pkgPath); err != nil {
+		return fmt.Errorf("delete symbols: %w", err)
+	}
+	return nil
+}
+
 // --- Read helpers ------------------------------------------------------------
 
 // GetSymbolByID fetches one symbol or returns (nil, nil) if not found.
