@@ -377,16 +377,17 @@ func (s *Store) PutEmbedding(symbolID int64, vec []float32, model string) error 
 
 // NearestNeighbors does a brute-force cosine search across all embeddings.
 //
-// This is intentionally simple. For repos up to ~100k embedded symbols on
-// a typical laptop this completes in well under a second. If/when we hit
-// a wall, we plug in sqlite-vec without changing this interface.
+// O(n) in the number of embedded symbols. Fast enough up to ~100k symbols on
+// a modern laptop. When the repo grows beyond that, replace with sqlite-vec:
+// register vec_distance_cosine via a go-sqlite3 ConnectHook and change the
+// query to `ORDER BY vec_distance_cosine(...) LIMIT k`. The blob format
+// (raw float32 LE) is identical so no migration is needed.
 func (s *Store) NearestNeighbors(query []float32, k int) ([]NeighborHit, error) {
 	rows, err := s.db.Query(`SELECT symbol_id, dim, vec FROM embeddings`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	// Pre-normalize the query so cosine collapses to a dot product.
 	q := normalize(append([]float32(nil), query...))
 	hits := make([]NeighborHit, 0, 1024)
 	for rows.Next() {
@@ -397,12 +398,10 @@ func (s *Store) NearestNeighbors(query []float32, k int) ([]NeighborHit, error) 
 			return nil, err
 		}
 		if dim != len(q) {
-			// Skip stale rows from a previous embedding model.
 			continue
 		}
 		v := decodeFloat32(blob, dim)
-		score := dot(q, normalize(v))
-		hits = append(hits, NeighborHit{SymbolID: id, Score: score})
+		hits = append(hits, NeighborHit{SymbolID: id, Score: dot(q, normalize(v))})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

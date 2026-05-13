@@ -27,12 +27,14 @@ import (
 
 // Stats summarizes what the parser found.
 type Stats struct {
-	Packages  int
-	Files     int
-	Symbols   int
-	CallEdges int
-	ImplEdges int
-	Errors    []string
+	Packages    int
+	Files       int
+	Symbols     int
+	CallEdges   int
+	ImplEdges   int
+	ImportEdges int
+	EmbedEdges  int
+	Errors      []string
 }
 
 // Parse loads all Go packages under repoRoot and writes symbols + edges to s.
@@ -65,6 +67,7 @@ func Parse(repoRoot string, s *store.Store) (*Stats, error) {
 	// because edges reference symbol IDs we don't have yet.
 	symIDs := make(map[types.Object]int64) // *types.Func/TypeName -> symbol id
 	fileIDs := make(map[string]int64)      // absolute file path -> file id
+	pkgSymIDs := make(map[string]int64)    // import path -> package symbol id
 
 	batch, err := s.Begin()
 	if err != nil {
@@ -86,6 +89,7 @@ func Parse(repoRoot string, s *store.Store) (*Stats, error) {
 			_ = batch.Rollback()
 			return nil, fmt.Errorf("put package symbol: %w", err)
 		}
+		pkgSymIDs[pkg.PkgPath] = pkgSymID
 
 		for _, file := range pkg.Syntax {
 			pos := pkg.Fset.Position(file.Pos())
@@ -247,6 +251,65 @@ func Parse(repoRoot string, s *store.Store) (*Stats, error) {
 							break
 						}
 					}
+				}
+			}
+		}
+
+		// imports edges: package → imported package (only within indexed packages).
+		srcPkgID, hasSrc := pkgSymIDs[pkg.PkgPath]
+		if hasSrc {
+			for importPath := range pkg.Imports {
+				dstPkgID, ok := pkgSymIDs[importPath]
+				if !ok {
+					continue // external package, not indexed
+				}
+				if err2 := batch.PutEdge(store.Edge{
+					Src: srcPkgID, Dst: dstPkgID, Relation: "imports", Weight: 1,
+				}); err2 == nil {
+					stats.ImportEdges++
+				} else {
+					stats.Errors = append(stats.Errors, fmt.Sprintf("imports edge %s→%s (src=%d,dst=%d): %v", pkg.PkgPath, importPath, srcPkgID, dstPkgID, err2))
+				}
+			}
+		}
+
+		// embeds edges: struct → embedded type (anonymous fields).
+		pkgScope := pkg.Types.Scope()
+		for _, name := range pkgScope.Names() {
+			obj := pkgScope.Lookup(name)
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				continue
+			}
+			st, ok := tn.Type().Underlying().(*types.Struct)
+			if !ok {
+				continue
+			}
+			structID, ok := symIDs[obj]
+			if !ok {
+				continue
+			}
+			for i := 0; i < st.NumFields(); i++ {
+				field := st.Field(i)
+				if !field.Embedded() {
+					continue
+				}
+				underlying := field.Type()
+				if ptr, ok2 := underlying.(*types.Pointer); ok2 {
+					underlying = ptr.Elem()
+				}
+				named, ok := underlying.(*types.Named)
+				if !ok {
+					continue
+				}
+				embeddedID, ok := symIDs[named.Obj()]
+				if !ok {
+					continue
+				}
+				if err := batch.PutEdge(store.Edge{
+					Src: structID, Dst: embeddedID, Relation: "embeds", Weight: 1,
+				}); err == nil {
+					stats.EmbedEdges++
 				}
 			}
 		}

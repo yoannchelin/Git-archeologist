@@ -2,8 +2,7 @@
 
 GOFLAGS ?= -tags fts5
 
-build:
-	go build $(GOFLAGS) ./...
+build: bin/archaeo bin/archaeo-mcp
 
 # Build standalone binaries into ./bin
 bin: bin/archaeo bin/archaeo-mcp

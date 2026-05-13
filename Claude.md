@@ -114,7 +114,7 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 3. **`sqlite-vec` auto-load** (1/2 journée) — passer la recherche vectorielle de brute-force à indexée. Nécessaire au-delà de ~50k symboles. Le SQL change peu, juste l'extension à charger via `_extensions` dans le DSN sqlite3.
 
-4. **Plus de relations dans le graphe** — actuellement on a `calls`, `implements`, `contains`. Ajouter `imports` (package → package), `uses` (func → var/const lus), `embeds` (struct → struct embarquée).
+4. ~~**Plus de relations dans le graphe**~~ — **FAIT** (`imports` et `embeds` ajoutés dans `internal/parser/parser.go`, pass 2). Reste : `uses` (func → var/const lus).
 
 5. **Détection d'entrypoints plus fine** — actuellement heuristiques sur signature. Améliorer : détecter `mux.HandleFunc`, `gin.Engine.GET/POST/...`, `cobra.Command`, schedulers (`robfig/cron`), workers (`go func()` dans `main`).
 
@@ -137,6 +137,7 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 - **Le parser fait deux passes** : pass 1 = symboles, pass 2 = edges, avec un Commit entre. Pourquoi : un parse error sur un package au pass 2 ne doit pas poisonner les symboles déjà persistés.
 - **`go/packages` charge tous les imports avec `NeedDeps`**. Sur un gros repo, ça peut consommer beaucoup de RAM. À surveiller, possibilité de retirer `NeedDeps` si problème (au prix de la résolution cross-package).
 - **`go-git` `ForEach` sentinel** : c'est `storer.ErrStop` (depuis `plumbing/storer`), pas une erreur custom. Erreur fréquente.
+- **`make build` ne mettait pas à jour `bin/`** — le target compilait avec `go build ./...` sans `-o`. Maintenant `build` délègue à `bin/archaeo` et `bin/archaeo-mcp`. Toujours vérifier que le bon binaire est utilisé lors du debug.
 
 ---
 

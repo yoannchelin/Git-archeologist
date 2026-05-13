@@ -106,9 +106,10 @@ func runIndex(args []string) {
 	}
 	fmt.Printf("Index built in %s\n", rep.Duration.Round(1e6))
 	if rep.ParseStats != nil {
-		fmt.Printf("  packages: %d\n  files: %d\n  symbols: %d\n  call edges: %d\n  impl edges: %d\n",
+		fmt.Printf("  packages: %d\n  files: %d\n  symbols: %d\n  call edges: %d\n  impl edges: %d\n  import edges: %d\n  embed edges: %d\n",
 			rep.ParseStats.Packages, rep.ParseStats.Files, rep.ParseStats.Symbols,
-			rep.ParseStats.CallEdges, rep.ParseStats.ImplEdges)
+			rep.ParseStats.CallEdges, rep.ParseStats.ImplEdges,
+			rep.ParseStats.ImportEdges, rep.ParseStats.EmbedEdges)
 	}
 	fmt.Printf("  commits: %d\n  embedded: %d\n", rep.Commits, rep.Embedded)
 	if n := len(rep.ParseErrors); n > 0 {
