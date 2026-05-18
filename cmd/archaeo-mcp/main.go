@@ -40,6 +40,7 @@ func main() {
 	embedModel := flag.String("embed-model", "nomic-embed-text", "embedding model")
 	watchFlag := flag.Bool("watch", true, "watch for .go file changes and incrementally re-index")
 	withTests := flag.Bool("with-tests", false, "include _test.go files in incremental re-index")
+	fast := flag.Bool("fast", false, "skip type-checking in incremental re-index (matches --fast used at index time)")
 	flag.Parse()
 
 	// Important: log to stderr only. stdout is the MCP wire.
@@ -70,7 +71,7 @@ func main() {
 	defer cancel()
 
 	if *watchFlag {
-		if err := index.StartWatcher(ctx, root, st, nil, log.Default(), *withTests); err != nil {
+		if err := index.StartWatcher(ctx, root, st, nil, log.Default(), *withTests, *fast); err != nil {
 			log.Printf("watcher disabled: %v", err)
 		}
 	}

@@ -23,7 +23,7 @@ func TestParseSample(t *testing.T) {
 	}
 	defer s.Close()
 
-	stats, err := parser.Parse(root, s, false)
+	stats, err := parser.Parse(root, s, parser.ParseConfig{})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

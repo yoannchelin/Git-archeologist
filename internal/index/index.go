@@ -7,6 +7,9 @@ package index
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/yoannchl/git-archaeologist/internal/embed"
@@ -21,12 +24,13 @@ type Options struct {
 	WithGit        bool // include git history (default true)
 	WithEmbeddings bool // include vector embeddings (default true)
 	WithTests      bool // include _test.go files (default false; ~2× slower parse)
+	Fast           bool // skip type-checking deps — no call/impl edges, ~3-5× faster
 	MaxCommits     int  // cap git traversal (default 5000)
 }
 
 // DefaultOptions returns sensible defaults for an onboarding index.
 func DefaultOptions() Options {
-	return Options{WithGit: true, WithEmbeddings: true, WithTests: false, MaxCommits: 5000}
+	return Options{WithGit: true, WithEmbeddings: true, WithTests: false, Fast: false, MaxCommits: 5000}
 }
 
 // Report summarises an index run.
@@ -56,9 +60,32 @@ func Build(
 	if progress != nil {
 		progress("parse", 0, 1)
 	}
-	pstats, err := parser.Parse(repoRoot, s, opt.WithTests)
-	if err != nil {
-		return report, fmt.Errorf("parse: %w", err)
+
+	cfg := parser.ParseConfig{WithTests: opt.WithTests, Fast: opt.Fast}
+
+	// Detect go.work: index each module directory so multi-module workspaces
+	// (e.g. Kubernetes) get full coverage instead of just the root module.
+	moduleDirs := parseGoWorkDirs(repoRoot)
+	if len(moduleDirs) == 0 {
+		moduleDirs = []string{""} // single module: LoadDir defaults to repoRoot
+	}
+
+	pstats := &parser.Stats{}
+	for _, modDir := range moduleDirs {
+		mcfg := cfg
+		mcfg.LoadDir = modDir
+		ms, err := parser.Parse(repoRoot, s, mcfg)
+		if err != nil {
+			return report, fmt.Errorf("parse: %w", err)
+		}
+		pstats.Packages += ms.Packages
+		pstats.Files += ms.Files
+		pstats.Symbols += ms.Symbols
+		pstats.CallEdges += ms.CallEdges
+		pstats.ImplEdges += ms.ImplEdges
+		pstats.ImportEdges += ms.ImportEdges
+		pstats.EmbedEdges += ms.EmbedEdges
+		pstats.Errors = append(pstats.Errors, ms.Errors...)
 	}
 	report.ParseStats = pstats
 	report.ParseErrors = pstats.Errors
@@ -122,4 +149,30 @@ func Build(
 	}
 	report.Duration = time.Since(start)
 	return report, nil
+}
+
+// parseGoWorkDirs reads go.work and returns the absolute path for each `use`
+// directive. Returns nil when no go.work exists or it cannot be read.
+func parseGoWorkDirs(repoRoot string) []string {
+	data, err := os.ReadFile(filepath.Join(repoRoot, "go.work"))
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	inUse := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case line == "use (":
+			inUse = true
+		case inUse && line == ")":
+			inUse = false
+		case inUse && line != "" && !strings.HasPrefix(line, "//"):
+			dirs = append(dirs, filepath.Join(repoRoot, filepath.FromSlash(line)))
+		case strings.HasPrefix(line, "use ") && !strings.Contains(line, "("):
+			p := strings.TrimSpace(strings.TrimPrefix(line, "use "))
+			dirs = append(dirs, filepath.Join(repoRoot, filepath.FromSlash(p)))
+		}
+	}
+	return dirs
 }

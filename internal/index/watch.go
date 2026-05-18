@@ -33,6 +33,7 @@ func StartWatcher(
 	llmClient *llm.Client,
 	logger *log.Logger,
 	withTests bool,
+	fast bool,
 ) error {
 	resolve := func(relPath string) (string, bool) {
 		// Fast path: file already indexed.
@@ -62,7 +63,7 @@ func StartWatcher(
 			logger.Printf("[watch] delete %s: %v", pkgPath, err)
 			return
 		}
-		stats, err := parser.ParsePackage(repoRoot, pkgPath, s, withTests)
+		stats, err := parser.ParsePackage(repoRoot, pkgPath, s, parser.ParseConfig{WithTests: withTests, Fast: fast})
 		if err != nil {
 			logger.Printf("[watch] parse %s: %v", pkgPath, err)
 			return
