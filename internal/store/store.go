@@ -12,11 +12,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // Store is a handle to a single repo's index database.
@@ -71,7 +69,7 @@ func Open(repoRoot string) (*Store, error) {
 	// _busy_timeout: SQLite will retry locked writes for up to 5s, which
 	// makes the indexer's parallel inserts robust without us managing locks.
 	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL", dbPath)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3_archaeo", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -357,7 +355,7 @@ func (s *Store) Neighbors(id int64, relation string, depth int, outgoing bool) (
 	}
 	visited := map[int64]bool{id: true}
 	frontier := []int64{id}
-	for hop := 0; hop < depth; hop++ {
+	for range depth {
 		if len(frontier) == 0 {
 			break
 		}
@@ -423,42 +421,36 @@ func (s *Store) PutEmbedding(symbolID int64, vec []float32, model string) error 
 	return err
 }
 
-// NearestNeighbors does a brute-force cosine search across all embeddings.
+// NearestNeighbors returns the k nearest embeddings to query using cosine
+// similarity.
 //
-// O(n) in the number of embedded symbols. Fast enough up to ~100k symbols on
-// a modern laptop. When the repo grows beyond that, replace with sqlite-vec:
-// register vec_distance_cosine via a go-sqlite3 ConnectHook and change the
-// query to `ORDER BY vec_distance_cosine(...) LIMIT k`. The blob format
-// (raw float32 LE) is identical so no migration is needed.
+// The inner loop runs inside SQLite's C layer via the cosine_sim() function
+// registered in vec.go, avoiding Go heap allocations for each stored vector.
+// Still O(n) scans — sufficient up to ~250k symbols. If we ever exceed that,
+// wire in sqlite-vec's vec0 virtual table for HNSW ANN search.
 func (s *Store) NearestNeighbors(query []float32, k int) ([]NeighborHit, error) {
-	rows, err := s.db.Query(`SELECT symbol_id, dim, vec FROM embeddings`)
+	qBlob := encodeFloat32(query)
+	rows, err := s.db.Query(
+		`SELECT symbol_id, CAST(cosine_sim(vec, ?) AS REAL) AS score
+		 FROM embeddings
+		 ORDER BY score DESC
+		 LIMIT ?`,
+		qBlob, k)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	q := normalize(append([]float32(nil), query...))
-	hits := make([]NeighborHit, 0, 1024)
+	hits := make([]NeighborHit, 0, k)
 	for rows.Next() {
-		var id int64
-		var dim int
-		var blob []byte
-		if err := rows.Scan(&id, &dim, &blob); err != nil {
+		var h NeighborHit
+		var score float64
+		if err := rows.Scan(&h.SymbolID, &score); err != nil {
 			return nil, err
 		}
-		if dim != len(q) {
-			continue
-		}
-		v := decodeFloat32(blob, dim)
-		hits = append(hits, NeighborHit{SymbolID: id, Score: dot(q, normalize(v))})
+		h.Score = float32(score)
+		hits = append(hits, h)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	sortHitsDesc(hits)
-	if k > len(hits) {
-		k = len(hits)
-	}
-	return hits[:k], nil
+	return hits, rows.Err()
 }
 
 // NeighborHit is a single nearest-neighbor result.
@@ -509,38 +501,3 @@ func encodeFloat32(v []float32) []byte {
 	return out
 }
 
-func decodeFloat32(b []byte, dim int) []float32 {
-	out := make([]float32, dim)
-	for i := 0; i < dim; i++ {
-		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
-	}
-	return out
-}
-
-func normalize(v []float32) []float32 {
-	var sum float32
-	for _, x := range v {
-		sum += x * x
-	}
-	if sum == 0 {
-		return v
-	}
-	inv := float32(1.0 / math.Sqrt(float64(sum)))
-	for i := range v {
-		v[i] *= inv
-	}
-	return v
-}
-
-func dot(a, b []float32) float32 {
-	var s float32
-	for i := range a {
-		s += a[i] * b[i]
-	}
-	return s
-}
-
-// sortHitsDesc is an in-place descending sort by score.
-func sortHitsDesc(h []NeighborHit) {
-	sort.Slice(h, func(i, j int) bool { return h[i].Score > h[j].Score })
-}
