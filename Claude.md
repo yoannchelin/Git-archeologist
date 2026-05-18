@@ -138,7 +138,11 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 10. ~~**go.work multi-module**~~ — **FAIT** : `parseGoWorkDirs()` dans `index/index.go` lit les directives `use` de `go.work`. `Build` itère chaque module dir en passant `ParseConfig.LoadDir`. Les chemins de fichiers restent relatifs à `repoRoot` (unchanged). Kubernetes/staging maintenant entièrement couvert.
 
-11. **Call graph TypeScript** — actuellement import edges seulement. Approche : scan heuristique des corps de fonctions pour les call sites (`identifier(`), résolution within-file d'abord, puis same-package. Cross-file via import edges déjà existants.
+11. ~~**Call graph TypeScript**~~ — **FAIT** : pass 3 dans `typescript.go` avec `reTSCallSite` regex + `buildTSCallIndex` + `extractTSCallEdges`. Résolution within-file > same-package > first match. ~55 identifiants filtrés dans `tsCallSkip` pour éviter le bruit (keywords, built-ins, méthodes built-in).
+
+12. ~~**Méthodes de classes TypeScript**~~ — **FAIT** : `extractTSSymbols` track la profondeur des accolades (`classDepth`) pour détecter les corps de classe. `reTSMethod` extrait les déclarations de méthodes à `classDepth==1`. Qualified name : `relPath.ClassName.MethodName`. Intégré au call graph (pass 3) sans changement : `callersByFile` inclut les méthodes via la query `kind=func`, attribution par plage de lignes fonctionne déjà.
+
+13. **Entrypoints : schedulers + goroutine workers** — `robfig/cron` schedulers, `go func()` dans `main`. Reste à détecter pour onboarding de services avec jobs en arrière-plan.
 
 ---
 
