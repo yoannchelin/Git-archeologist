@@ -12,9 +12,11 @@
 //	function/async function declarations  → kind=func
 //	const arrow functions at column 0     → kind=func
 //	class declarations                    → kind=type
+//	class methods (at class-body depth 1) → kind=func, name = Class.method
 //	interface declarations                → kind=interface
 //	type alias declarations               → kind=type
 //	local import statements               → imports edges between file symbols
+//	heuristic call edges (pass 3)         → calls edges between func symbols
 //
 // Qualified name format: "<relpath>.<SymbolName>" (e.g. "src/api/handler.ts.processPayment")
 // Package field: directory of the file (e.g. "src/api")
@@ -38,6 +40,10 @@ var (
 	reTSInterface = regexp.MustCompile(`^(?:export\s+)?interface\s+([A-Za-z_$][A-Za-z0-9_$]*)`)
 	reTSTypeAlias = regexp.MustCompile(`^(?:export\s+)?type\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*)?\s*=`)
 	reTSImport    = regexp.MustCompile(`from\s+['"](\.[^'"]+)['"]`)
+
+	// reTSMethod matches method declarations inside a class body: optional access
+	// modifiers followed by an identifier and '(' or '<' (generics).
+	reTSMethod = regexp.MustCompile(`^(?:(?:public|private|protected|static|async|readonly|override|abstract)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<]`)
 
 	// reTSCallSite matches any identifier immediately followed by '(', which is
 	// the syntactic shape of a function or method call. Word-boundary anchoring
@@ -84,6 +90,17 @@ var tsCallSkip = map[string]bool{
 	"describe": true, "it": true, "test": true, "expect": true,
 	"beforeEach": true, "afterEach": true, "beforeAll": true, "afterAll": true,
 	"jest": true, "vi": true, "spyOn": true,
+}
+
+// tsMethodSkip filters out identifiers that look like method declarations but
+// are control-flow keywords or produce too many noisy matches.
+var tsMethodSkip = map[string]bool{
+	"if": true, "else": true, "for": true, "while": true, "do": true,
+	"switch": true, "return": true, "throw": true, "try": true,
+	"typeof": true, "instanceof": true, "void": true, "delete": true,
+	"await": true, "new": true,
+	// Property accessors generate noise; set/get are already in tsCallSkip.
+	"get": true, "set": true,
 }
 
 // ParseTS walks the repo for TypeScript and TSX files, inserting symbols and
@@ -404,13 +421,18 @@ func findTSFiles(root string) ([]string, error) {
 	return out, err
 }
 
-// extractTSSymbols scans lines for top-level TypeScript declarations.
-// Only lines starting at column 0 are examined to avoid matching class methods
-// or nested functions.
+// extractTSSymbols scans lines for TypeScript declarations: top-level
+// functions/classes/interfaces/type-aliases at column 0, plus class methods
+// at class-body depth 1 (one level inside the class braces).
 func extractTSSymbols(relPath string, lines []string) []store.Symbol {
 	var syms []store.Symbol
 	var docBuf strings.Builder
 	inBlockComment := false
+
+	// Class body tracking: currentClass is the name of the class we're inside;
+	// classDepth counts net open braces (1 = direct class body, 2+ = nested).
+	var currentClass string
+	var classDepth int
 
 	qual := func(name string) string { return relPath + "." + name }
 	exported := func(line string) bool { return strings.HasPrefix(line, "export ") }
@@ -418,8 +440,45 @@ func extractTSSymbols(relPath string, lines []string) []store.Symbol {
 	for i, raw := range lines {
 		lineNo := i + 1
 
-		// Only match top-level (column-0) declarations.
+		// Update class body depth. Snapshot before counting so method detection
+		// uses the depth at the START of the line: `method() {` has depth 1 at
+		// the opening identifier even though it becomes depth 2 by line-end.
+		prevClassDepth := classDepth
+		if currentClass != "" {
+			for _, ch := range raw {
+				switch ch {
+				case '{':
+					classDepth++
+				case '}':
+					classDepth--
+				}
+			}
+			if classDepth <= 0 {
+				currentClass = ""
+				classDepth = 0
+			}
+		}
+
+		// Indented lines: either inside a class body or a function body — skip
+		// for top-level detection, but try method extraction at class depth 1.
 		if len(raw) > 0 && (raw[0] == ' ' || raw[0] == '\t') {
+			if currentClass != "" && prevClassDepth == 1 {
+				trimmedIndented := strings.TrimSpace(raw)
+				if m := reTSMethod.FindStringSubmatch(trimmedIndented); m != nil {
+					name := m[1]
+					if !tsMethodSkip[name] {
+						syms = append(syms, store.Symbol{
+							Kind:      "func",
+							Name:      name,
+							Qualified: relPath + "." + currentClass + "." + name,
+							LineStart: lineNo,
+							LineEnd:   lineNo,
+							Exported:  true,
+							Signature: truncateLine(currentClass + "." + trimmedIndented),
+						})
+					}
+				}
+			}
 			docBuf.Reset()
 			continue
 		}
@@ -473,13 +532,29 @@ func extractTSSymbols(relPath string, lines []string) []store.Symbol {
 			})
 			continue
 		}
-		// Class declaration
+		// Class declaration: record the symbol and start class body tracking.
 		if m := reTSClass.FindStringSubmatch(trimmed); m != nil {
 			syms = append(syms, store.Symbol{
 				Kind: "type", Name: m[1], Qualified: qual(m[1]),
 				LineStart: lineNo, LineEnd: lineNo,
 				Exported: exported(trimmed), Doc: doc,
 			})
+			currentClass = m[1]
+			// Count braces on the declaration line to initialise depth.
+			// `class Foo {` → classDepth=1; body-on-next-line → classDepth=0 initially.
+			classDepth = 0
+			for _, ch := range raw {
+				switch ch {
+				case '{':
+					classDepth++
+				case '}':
+					classDepth--
+				}
+			}
+			if classDepth <= 0 {
+				currentClass = "" // empty / single-line class
+				classDepth = 0
+			}
 			continue
 		}
 		// Interface declaration
