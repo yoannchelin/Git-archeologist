@@ -116,10 +116,12 @@ func (s *Server) handleQuery(
 type EntrypointsInput struct{}
 
 type EntrypointsOutput struct {
-	Mains       []SymbolBrief `json:"mains"`
-	Inits       []SymbolBrief `json:"inits"`
-	HTTPRoutes  []SymbolBrief `json:"http_routes,omitempty"`
-	Description string        `json:"description"`
+	Mains         []SymbolBrief `json:"mains"`
+	Inits         []SymbolBrief `json:"inits"`
+	HTTPRoutes    []SymbolBrief `json:"http_routes,omitempty"`
+	CobraCommands []SymbolBrief `json:"cobra_commands,omitempty"`
+	GRPCServices  []SymbolBrief `json:"grpc_services,omitempty"`
+	Description   string        `json:"description"`
 }
 
 func (s *Server) handleEntrypoints(
@@ -128,7 +130,7 @@ func (s *Server) handleEntrypoints(
 	_ EntrypointsInput,
 ) (*mcp.CallToolResult, EntrypointsOutput, error) {
 	out := EntrypointsOutput{
-		Description: "Entrypoints of the repository. main() functions are the binary entry; init() functions run at package load. HTTP routes are heuristic — symbols whose names match registration patterns.",
+		Description: "Entrypoints of the repository. main() functions are the binary entry; init() functions run at package load. HTTP routes, Cobra commands, and gRPC services are detected heuristically.",
 	}
 
 	// main() functions
@@ -155,8 +157,7 @@ func (s *Server) handleEntrypoints(
 		out.Inits = inits
 	}
 
-	// HTTP routes (heuristic): symbols whose signature mentions http.Handler,
-	// http.HandleFunc, mux.HandleFunc, gin/chi/echo routers.
+	// HTTP routes (heuristic): handlers by signature pattern.
 	rows, err = s.Store.DB().Query(`
 		SELECT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
 		       s.line_start, s.line_end, s.signature, s.doc, s.exported
@@ -173,6 +174,41 @@ func (s *Server) handleEntrypoints(
 		rows.Close()
 		out.HTTPRoutes = routes
 	}
+
+	// Cobra commands (heuristic): vars/funcs that look like CLI root commands.
+	rows, err = s.Store.DB().Query(`
+		SELECT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
+		       s.line_start, s.line_end, s.signature, s.doc, s.exported
+		FROM symbols s
+		WHERE (s.name LIKE '%Cmd' OR s.name LIKE '%Command'
+		    OR s.name = 'Execute' OR s.name = 'execute'
+		    OR s.doc LIKE '%cobra.Command%')
+		  AND s.kind IN ('var', 'func')
+		ORDER BY s.qualified
+		LIMIT 30`)
+	if err == nil {
+		cobras, _ := briefsFromRows(s.Store, rows)
+		rows.Close()
+		out.CobraCommands = cobras
+	}
+
+	// gRPC services (heuristic): functions that register a gRPC service or
+	// return a gRPC server type.
+	rows, err = s.Store.DB().Query(`
+		SELECT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
+		       s.line_start, s.line_end, s.signature, s.doc, s.exported
+		FROM symbols s
+		WHERE s.name LIKE 'Register%Server'
+		   OR s.signature LIKE '%grpc.Server%'
+		   OR s.doc LIKE '%grpc%server%'
+		ORDER BY s.qualified
+		LIMIT 30`)
+	if err == nil {
+		grpcs, _ := briefsFromRows(s.Store, rows)
+		rows.Close()
+		out.GRPCServices = grpcs
+	}
+
 	return nil, out, nil
 }
 

@@ -119,6 +119,10 @@ func Query(
 	}
 
 	// --- 4. Hydrate + rank ---
+	// Pre-fetch recently-modified files for freshness scoring. Failure here
+	// is non-fatal: we just skip the boost.
+	recentFiles, _ := s.RecentFileIDs(30)
+
 	out := make([]Result, 0, len(pool))
 	for _, r := range pool {
 		sym, err := s.GetSymbolByID(r.Symbol.ID)
@@ -135,6 +139,12 @@ func Query(
 		// only hits we have. For onboarding, hand-written code is the answer.
 		if r.File != nil && (r.File.IsGenerated || r.File.IsTest) {
 			r.Score *= 0.4
+		}
+		// Freshness boost: recently-committed symbols are likely more
+		// relevant for "where does X happen?" in an active codebase.
+		if r.File != nil && recentFiles[r.File.ID] {
+			r.Score += 0.15
+			r.Reasons = append(r.Reasons, "recent")
 		}
 		out = append(out, *r)
 	}
