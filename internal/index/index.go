@@ -61,6 +61,18 @@ func Build(
 	}
 	report.ParseStats = pstats
 	report.ParseErrors = pstats.Errors
+
+	// TypeScript support: parse .ts/.tsx files if present. Non-fatal if the
+	// repo has none — ParseTS returns an empty Stats in that case.
+	if tsStats, err := parser.ParseTS(repoRoot, s); err != nil {
+		report.ParseErrors = append(report.ParseErrors, "ts: "+err.Error())
+	} else {
+		report.ParseStats.Files += tsStats.Files
+		report.ParseStats.Symbols += tsStats.Symbols
+		report.ParseStats.ImportEdges += tsStats.ImportEdges
+		report.ParseErrors = append(report.ParseErrors, tsStats.Errors...)
+	}
+
 	if progress != nil {
 		progress("parse", 1, 1)
 	}

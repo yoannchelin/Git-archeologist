@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -45,6 +47,7 @@ type File struct {
 	LOC         int
 	IsTest      bool
 	IsGenerated bool
+	Language    string // "go", "typescript", etc. — defaults to "go"
 }
 
 // Edge is a typed relation between two symbols.
@@ -76,7 +79,23 @@ func Open(repoRoot string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db, path: dbPath}, nil
+}
+
+// applyMigrations runs schema additions that post-date the initial Schema const.
+// Each ALTER is idempotent: "duplicate column name" is silently ignored.
+func applyMigrations(db *sql.DB) error {
+	// S2: multi-language support requires a language column on files.
+	if _, err := db.Exec(`ALTER TABLE files ADD COLUMN language TEXT NOT NULL DEFAULT 'go'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate files.language: %w", err)
+		}
+	}
+	return nil
 }
 
 // Close releases the DB handle.
@@ -131,13 +150,14 @@ func (s *Store) Begin() (*BatchInsert, error) {
 		return nil, err
 	}
 	fileStmt, err := tx.Prepare(`
-		INSERT INTO files(path, package, loc, is_test, is_generated)
-		VALUES(?, ?, ?, ?, ?)
+		INSERT INTO files(path, package, loc, is_test, is_generated, language)
+		VALUES(?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			package = excluded.package,
 			loc = excluded.loc,
 			is_test = excluded.is_test,
-			is_generated = excluded.is_generated
+			is_generated = excluded.is_generated,
+			language = excluded.language
 		RETURNING id`)
 	if err != nil {
 		_ = tx.Rollback()
@@ -172,9 +192,13 @@ func (s *Store) Begin() (*BatchInsert, error) {
 
 // PutFile inserts/updates a file row and returns its id.
 func (b *BatchInsert) PutFile(f File) (int64, error) {
+	lang := f.Language
+	if lang == "" {
+		lang = "go"
+	}
 	var id int64
 	err := b.fileStmt.QueryRow(
-		f.Path, f.Package, f.LOC, boolToInt(f.IsTest), boolToInt(f.IsGenerated),
+		f.Path, f.Package, f.LOC, boolToInt(f.IsTest), boolToInt(f.IsGenerated), lang,
 	).Scan(&id)
 	return id, err
 }
@@ -258,11 +282,11 @@ func (s *Store) GetSymbolByID(id int64) (*Symbol, error) {
 // GetFileByID fetches one file row.
 func (s *Store) GetFileByID(id int64) (*File, error) {
 	row := s.db.QueryRow(`
-		SELECT id, path, package, loc, is_test, is_generated
+		SELECT id, path, package, loc, is_test, is_generated, COALESCE(language, 'go')
 		FROM files WHERE id = ?`, id)
 	var f File
 	var isTest, isGen int
-	if err := row.Scan(&f.ID, &f.Path, &f.Package, &f.LOC, &isTest, &isGen); err != nil {
+	if err := row.Scan(&f.ID, &f.Path, &f.Package, &f.LOC, &isTest, &isGen, &f.Language); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -271,6 +295,30 @@ func (s *Store) GetFileByID(id int64) (*File, error) {
 	f.IsTest = isTest != 0
 	f.IsGenerated = isGen != 0
 	return &f, nil
+}
+
+// RecentFileIDs returns the set of file IDs that received a commit within the
+// last `days` days. Used by the retrieval layer to apply a freshness score boost.
+func (s *Store) RecentFileIDs(days int) (map[int64]bool, error) {
+	cutoff := time.Now().AddDate(0, 0, -days).Unix()
+	rows, err := s.db.Query(`
+		SELECT DISTINCT fc.file_id
+		FROM file_commits fc
+		JOIN commits c ON c.hash = fc.commit_hash
+		WHERE c.ts >= ?`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]bool)
+	for rows.Next() {
+		var fid int64
+		if err := rows.Scan(&fid); err != nil {
+			return nil, err
+		}
+		out[fid] = true
+	}
+	return out, rows.Err()
 }
 
 // SearchFTS runs a lexical search over symbols. `query` follows FTS5 syntax.
