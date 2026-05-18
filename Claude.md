@@ -120,7 +120,15 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 4. ~~**Plus de relations dans le graphe**~~ — **FAIT** (`imports`, `embeds`)
 5. ~~**Détection d'entrypoints plus fine**~~ — **FAIT** (Cobra, gRPC ajoutés). Reste : schedulers (`robfig/cron`), workers (`go func()` dans `main`).
 
-6. **Tests d'intégration sur 3 vrais repos Go** : Kubernetes (énorme), Terraform (moyen), Hugo (petit). Mesurer : temps d'index, qualité du retrieval sur 10 questions templates.
+6. ~~**Tests d'intégration sur 3 vrais repos Go**~~ — **FAIT**. Résultats :
+
+   | Repo | Files | Symbols | Call edges | Impl edges | Temps |
+   |---|---|---|---|---|---|
+   | Hugo | 500 | 7 976 | 7 721 | 2 660 | 18s |
+   | Terraform | 1 200 | 16 672 | 21 117 | 1 806 | **63s** ⚠️ |
+   | Kubernetes | 3 358 | 43 475 | 44 572 | 2 638 | 11s |
+
+   Qualité FTS ~65-70% sans embeddings (scheduler k8s, state Terraform : 3/3 ; shortcodes Hugo, API server k8s : 1/3). Embeddings indispensables pour les queries sémantiques ambiguës.
 
 7. ~~**Re-ranker plus malin**~~ — **FAIT** : PageRank (`store/pagerank.go`, 20 itérations, +0.2×score) + freshness (+0.15). Reste : centralité par in-degree brut si PageRank est trop lent sur très gros graphes.
 
@@ -146,6 +154,8 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 - **Les fichiers de test TS ne suivent pas tous le pattern `_test.go`** — il faut détecter les dossiers (`tests/`, `__tests__`, `spec/`, `e2e/`, `__mocks__`) ET les suffixes (`.test.ts`, `.spec.ts`). Voir `isTSTestFile()` dans `typescript.go`. Sans ça, les milliers de cas de test du repo TypeScript (microsoft/TypeScript) noient les vrais résultats de retrieval.
 - **`cosine_sim` enregistré via ConnectHook** : le driver s'appelle `"sqlite3_archaeo"` (pas `"sqlite3"`). Si tu ajoutes d'autres tests ou outils qui ouvrent une DB directement, ils doivent utiliser ce driver, sinon `cosine_sim` n'est pas disponible et les queries vectorielles échouent.
 - **FTS seul ne suffit pas pour le sémantique** — testé sur microsoft/TypeScript : "where is parsing done" ne trouve pas `parser.ts` en #1 sans embeddings. Le FTS stemme "parsing" → "pars" mais les 20k fichiers de test avec "pars" dans le nom noient le signal. Les embeddings (Ollama) sont indispensables pour la qualité sémantique.
+- **Terraform est lent à indexer (~63s pour 1200 fichiers)** — `NeedDeps` dans `packages.Load` force Go à type-checker toutes les dépendances externes (Terraform en a beaucoup : AWS SDK, Azure SDK, etc.). Solution possible : retirer `NeedDeps` pour sacrifier la résolution cross-package (au prix d'un call graph moins précis). À faire si quelqu'un se plaint de la vitesse.
+- **Repos multi-modules avec `go.work`** (ex : Kubernetes) : seul le module principal est indexé. Les sous-modules dans `staging/` ne sont pas chargés. `go/packages` ne traverse pas automatiquement un workspace. Workaround : lancer `archaeo index` séparément dans chaque sous-module, ou détecter `go.work` et charger chaque module listé. Documenté comme limitation connue.
 
 ---
 
