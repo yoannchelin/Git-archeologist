@@ -122,11 +122,11 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 6. **Tests d'intégration sur 3 vrais repos Go** : Kubernetes (énorme), Terraform (moyen), Hugo (petit). Mesurer : temps d'index, qualité du retrieval sur 10 questions templates.
 
-7. **Re-ranker plus malin** — intégrer la centralité PageRank dans le graphe. La fraîcheur Git est déjà là (+0.15).
+7. ~~**Re-ranker plus malin**~~ — **FAIT** : PageRank (`store/pagerank.go`, 20 itérations, +0.2×score) + freshness (+0.15). Reste : centralité par in-degree brut si PageRank est trop lent sur très gros graphes.
 
-8. **Support des `_test.go`** — actuellement exclus. Les tests sont souvent la *meilleure* doc d'un module. À réintégrer avec un flag `--with-tests`.
+8. ~~**Support des `_test.go`**~~ — **FAIT** : flag `--with-tests` sur `archaeo index` et `archaeo-mcp`. Symbols marqués `is_test`, pénalité 0.4× en retrieval.
 
-9. **Call graph TypeScript** — actuellement on a les import edges mais pas les call edges (qui appelle quoi). Nécessite de parser les corps de fonctions, ce qui sort du regexp simple → tree-sitter ou analyse heuristique des call sites.
+9. **Call graph TypeScript** — actuellement import edges seulement. Approche : scan heuristique des corps de fonctions pour les call sites (`identifier(`), résolution within-file d'abord, puis same-package. Cross-file via import edges déjà existants.
 
 ---
 
