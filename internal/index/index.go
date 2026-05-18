@@ -109,6 +109,12 @@ func Build(
 		report.Embedded = lastDone
 	}
 
+	// PageRank: computed after all edges are in place. Non-fatal so a graph
+	// with no edges (e.g. --no-embed on a fresh TS repo) doesn't abort the build.
+	if err := s.ComputePageRank(); err != nil {
+		report.ParseErrors = append(report.ParseErrors, "pagerank: "+err.Error())
+	}
+
 	if err := s.SetMeta("last_index", time.Now().Format(time.RFC3339)); err != nil {
 		return report, err
 	}

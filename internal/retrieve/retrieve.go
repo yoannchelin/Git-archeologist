@@ -146,6 +146,14 @@ func Query(
 			r.Score += 0.15
 			r.Reasons = append(r.Reasons, "recent")
 		}
+		// Centrality boost: symbols with high PageRank are called/imported by
+		// many others — they're "load-bearing" and likely relevant for
+		// architecture questions. Cap the boost at 0.2 to avoid drowning vector
+		// or FTS signal (a central but irrelevant symbol should not win).
+		if r.Symbol.PageRank > 0.3 {
+			r.Score += float32(r.Symbol.PageRank) * 0.2
+			r.Reasons = append(r.Reasons, "central")
+		}
 		out = append(out, *r)
 	}
 	sortResultsDesc(out)

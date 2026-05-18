@@ -35,6 +35,7 @@ type Symbol struct {
 	Signature string
 	Doc       string
 	Exported  bool
+	PageRank  float64 // normalised [0,1]; 0 = not yet computed or isolated node
 }
 
 // File mirrors the `files` table.
@@ -91,6 +92,12 @@ func applyMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE files ADD COLUMN language TEXT NOT NULL DEFAULT 'go'`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migrate files.language: %w", err)
+		}
+	}
+	// PageRank scores, computed after each index build.
+	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN pagerank REAL NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate symbols.pagerank: %w", err)
 		}
 	}
 	return nil
@@ -272,7 +279,7 @@ func (s *Store) DeletePackageData(pkgPath string) error {
 func (s *Store) GetSymbolByID(id int64) (*Symbol, error) {
 	row := s.db.QueryRow(`
 		SELECT id, kind, name, qualified, COALESCE(file_id, 0),
-		       line_start, line_end, signature, doc, exported
+		       line_start, line_end, signature, doc, exported, pagerank
 		FROM symbols WHERE id = ?`, id)
 	return scanSymbol(row)
 }
@@ -324,7 +331,7 @@ func (s *Store) RecentFileIDs(days int) (map[int64]bool, error) {
 func (s *Store) SearchFTS(query string, limit int) ([]Symbol, error) {
 	rows, err := s.db.Query(`
 		SELECT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
-		       s.line_start, s.line_end, s.signature, s.doc, s.exported
+		       s.line_start, s.line_end, s.signature, s.doc, s.exported, s.pagerank
 		FROM symbols_fts f
 		JOIN symbols s ON s.id = f.rowid
 		WHERE symbols_fts MATCH ?
@@ -469,7 +476,7 @@ func scanSymbol(r rowScanner) (*Symbol, error) {
 	var s Symbol
 	var exported int
 	if err := r.Scan(&s.ID, &s.Kind, &s.Name, &s.Qualified, &s.FileID,
-		&s.LineStart, &s.LineEnd, &s.Signature, &s.Doc, &exported); err != nil {
+		&s.LineStart, &s.LineEnd, &s.Signature, &s.Doc, &exported, &s.PageRank); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
