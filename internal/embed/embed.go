@@ -132,6 +132,67 @@ func buildEmbedText(repoRoot string, s *store.Store, sym store.Symbol) (string, 
 	return strings.TrimSpace(sb.String()), nil
 }
 
+// RunPackage embeds only the symbols belonging to pkgPath.
+// Used by the incremental watcher so a single file save doesn't re-embed the
+// entire repo — just the changed package.
+func RunPackage(
+	ctx context.Context,
+	s *store.Store,
+	client *llm.Client,
+	repoRoot string,
+	pkgPath string,
+	progress func(done, total int),
+) error {
+	rows, err := s.DB().Query(`
+		SELECT sym.id, sym.kind, sym.name, sym.qualified, COALESCE(sym.file_id, 0),
+		       sym.line_start, sym.line_end, sym.signature, sym.doc, sym.exported
+		FROM symbols sym
+		JOIN files f ON f.id = sym.file_id
+		WHERE sym.kind IN ('func','method','type','interface','file')
+		  AND f.package = ?
+		ORDER BY sym.id`, pkgPath)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var symbols []store.Symbol
+	for rows.Next() {
+		var sym store.Symbol
+		var exported int
+		if err := rows.Scan(&sym.ID, &sym.Kind, &sym.Name, &sym.Qualified,
+			&sym.FileID, &sym.LineStart, &sym.LineEnd, &sym.Signature,
+			&sym.Doc, &exported); err != nil {
+			return err
+		}
+		sym.Exported = exported != 0
+		symbols = append(symbols, sym)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	total := len(symbols)
+	for i, sym := range symbols {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		text, err := buildEmbedText(repoRoot, s, sym)
+		if err != nil {
+			return fmt.Errorf("build text for %s: %w", sym.Qualified, err)
+		}
+		vec, err := client.Embed(ctx, text)
+		if err != nil {
+			return fmt.Errorf("embed %s: %w", sym.Qualified, err)
+		}
+		if err := s.PutEmbedding(sym.ID, vec, client.EmbedModel); err != nil {
+			return fmt.Errorf("store embedding %s: %w", sym.Qualified, err)
+		}
+		if progress != nil && (i%25 == 0 || i == total-1) {
+			progress(i+1, total)
+		}
+	}
+	return nil
+}
+
 func readLines(path string, start, end int) (string, error) {
 	if start < 1 {
 		start = 1

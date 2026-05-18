@@ -128,13 +128,25 @@ func (s *Server) callGraphDiagram(qualified string, depth int) (*mcp.CallToolRes
 		_ = rows.Close()
 	}
 
-	// Fetch labels for every node in one round-trip per node (small N, OK).
+	// Fetch labels for all nodes in one round-trip using IN (...).
 	type nodeInfo struct{ name, kind string }
 	labels := make(map[int64]nodeInfo, len(nodeIDs))
-	for id := range nodeIDs {
-		var n, k string
-		_ = db.QueryRow(`SELECT name, kind FROM symbols WHERE id = ?`, id).Scan(&n, &k)
-		labels[id] = nodeInfo{n, k}
+	{
+		ids := make([]int64, 0, len(nodeIDs))
+		for id := range nodeIDs {
+			ids = append(ids, id)
+		}
+		ph, args := inPlaceholders(ids)
+		lrows, err := db.Query(fmt.Sprintf(`SELECT id, name, kind FROM symbols WHERE id IN (%s)`, ph), args...)
+		if err == nil {
+			for lrows.Next() {
+				var id int64
+				var n, k string
+				_ = lrows.Scan(&id, &n, &k)
+				labels[id] = nodeInfo{n, k}
+			}
+			_ = lrows.Close()
+		}
 	}
 
 	// Render Mermaid. Root node uses a stadium shape to stand out.

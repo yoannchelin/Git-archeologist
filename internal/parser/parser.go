@@ -178,8 +178,10 @@ func Parse(repoRoot string, s *store.Store) (*Stats, error) {
 		if pkg.TypesInfo == nil {
 			continue
 		}
-		// call edges
+		// call edges — use pre-computed function ranges per file to avoid O(n²)
+		// AST walks (old enclosingFunc re-walked the file for every call site).
 		for _, file := range pkg.Syntax {
+			funcRanges := buildFuncRanges(file, pkg.TypesInfo)
 			ast.Inspect(file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -189,7 +191,7 @@ func Parse(repoRoot string, s *store.Store) (*Stats, error) {
 				if callee == nil {
 					return true
 				}
-				caller := enclosingFunc(file, call.Pos(), pkg.TypesInfo)
+				caller := enclosingFuncFast(funcRanges, call.Pos())
 				if caller == nil {
 					return true
 				}
@@ -443,27 +445,37 @@ func resolveCallee(fun ast.Expr, info *types.Info) types.Object {
 	return nil
 }
 
-// enclosingFunc walks up to find the *types.Func that contains the given pos.
-// We do a fresh AST walk per call; cheap enough at MVP scale, replaceable with
-// a per-file map if it ever shows up in a profile.
-func enclosingFunc(file *ast.File, pos token.Pos, info *types.Info) types.Object {
-	var enclosing types.Object
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			return false
-		}
-		fn, ok := n.(*ast.FuncDecl)
+// funcRange is a half-open position range for one top-level function declaration.
+type funcRange struct {
+	start, end token.Pos
+	obj        types.Object
+}
+
+// buildFuncRanges collects function position ranges from a file's top-level
+// declarations. Called once per file so we don't re-walk for every call-site.
+func buildFuncRanges(file *ast.File, info *types.Info) []funcRange {
+	out := make([]funcRange, 0, len(file.Decls))
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
-			return true
+			continue
 		}
-		if fn.Pos() <= pos && pos <= fn.End() {
-			if obj := info.Defs[fn.Name]; obj != nil {
-				enclosing = obj
-			}
+		if obj := info.Defs[fn.Name]; obj != nil {
+			out = append(out, funcRange{fn.Pos(), fn.End(), obj})
 		}
-		return true
-	})
-	return enclosing
+	}
+	return out
+}
+
+// enclosingFuncFast returns the function that contains pos using the
+// pre-computed ranges. O(F) where F = top-level function count in the file.
+func enclosingFuncFast(ranges []funcRange, pos token.Pos) types.Object {
+	for _, r := range ranges {
+		if r.start <= pos && pos <= r.end {
+			return r.obj
+		}
+	}
+	return nil
 }
 
 // receiverTypeName extracts the bare type name from a method receiver,
@@ -639,6 +651,7 @@ func ParsePackage(repoRoot, pkgPath string, s *store.Store) (*Stats, error) {
 	}
 	if target.TypesInfo != nil {
 		for _, file := range target.Syntax {
+			funcRanges := buildFuncRanges(file, target.TypesInfo)
 			ast.Inspect(file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -648,7 +661,7 @@ func ParsePackage(repoRoot, pkgPath string, s *store.Store) (*Stats, error) {
 				if callee == nil {
 					return true
 				}
-				caller := enclosingFunc(file, call.Pos(), target.TypesInfo)
+				caller := enclosingFuncFast(funcRanges, call.Pos())
 				if caller == nil {
 					return true
 				}

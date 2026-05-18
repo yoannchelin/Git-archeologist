@@ -69,8 +69,8 @@ func StartWatcher(
 		logger.Printf("[watch] %s: %d symbols, %d call edges", pkgPath, stats.Symbols, stats.CallEdges)
 		if llmClient != nil {
 			go func() {
-				if err := embed.Run(ctx, s, llmClient, repoRoot, nil); err != nil {
-					logger.Printf("[watch] embed: %v", err)
+				if err := embed.RunPackage(ctx, s, llmClient, repoRoot, pkgPath, nil); err != nil {
+					logger.Printf("[watch] embed %s: %v", pkgPath, err)
 				}
 			}()
 		}
