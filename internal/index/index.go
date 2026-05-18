@@ -20,12 +20,13 @@ import (
 type Options struct {
 	WithGit        bool // include git history (default true)
 	WithEmbeddings bool // include vector embeddings (default true)
+	WithTests      bool // include _test.go files (default false; ~2× slower parse)
 	MaxCommits     int  // cap git traversal (default 5000)
 }
 
 // DefaultOptions returns sensible defaults for an onboarding index.
 func DefaultOptions() Options {
-	return Options{WithGit: true, WithEmbeddings: true, MaxCommits: 5000}
+	return Options{WithGit: true, WithEmbeddings: true, WithTests: false, MaxCommits: 5000}
 }
 
 // Report summarises an index run.
@@ -55,7 +56,7 @@ func Build(
 	if progress != nil {
 		progress("parse", 0, 1)
 	}
-	pstats, err := parser.Parse(repoRoot, s)
+	pstats, err := parser.Parse(repoRoot, s, opt.WithTests)
 	if err != nil {
 		return report, fmt.Errorf("parse: %w", err)
 	}

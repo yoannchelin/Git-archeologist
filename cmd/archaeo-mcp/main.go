@@ -39,6 +39,7 @@ func main() {
 	chatModel := flag.String("chat-model", "qwen2.5-coder:14b", "chat model")
 	embedModel := flag.String("embed-model", "nomic-embed-text", "embedding model")
 	watchFlag := flag.Bool("watch", true, "watch for .go file changes and incrementally re-index")
+	withTests := flag.Bool("with-tests", false, "include _test.go files in incremental re-index")
 	flag.Parse()
 
 	// Important: log to stderr only. stdout is the MCP wire.
@@ -69,7 +70,7 @@ func main() {
 	defer cancel()
 
 	if *watchFlag {
-		if err := index.StartWatcher(ctx, root, st, nil, log.Default()); err != nil {
+		if err := index.StartWatcher(ctx, root, st, nil, log.Default(), *withTests); err != nil {
 			log.Printf("watcher disabled: %v", err)
 		}
 	}

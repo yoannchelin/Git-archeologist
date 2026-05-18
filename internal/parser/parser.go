@@ -42,13 +42,20 @@ type Stats struct {
 // The function is intentionally single-shot: it tears down and rebuilds the
 // portion of the graph it owns. Incremental indexing is a follow-up; getting
 // the model right matters more than incrementality at MVP.
-func Parse(repoRoot string, s *store.Store) (*Stats, error) {
+// Parse walks a Go repository and indexes all symbols and edges.
+//
+// withTests controls whether _test.go files are included. Enabling it roughly
+// doubles packages.Load time but surfaces test helpers and usage examples —
+// valuable for onboarding questions like "how do I use package X?". Test
+// symbols receive the standard is_test penalty in retrieval so they don't
+// crowd out production code.
+func Parse(repoRoot string, s *store.Store, withTests bool) (*Stats, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedTypes | packages.NeedSyntax |
 			packages.NeedTypesInfo | packages.NeedDeps,
 		Dir:   repoRoot,
-		Tests: false, // tests double the load time; we add them in S2
+		Tests: withTests,
 	}
 
 	pkgs, err := packages.Load(cfg, "./...")
@@ -538,13 +545,13 @@ func isGenerated(file *ast.File) bool {
 // Cross-package call edges from this package to others are not regenerated
 // here — they will be correct after a full `Parse` run. For day-to-day
 // incremental updates (function bodies, signatures, docs) this is fine.
-func ParsePackage(repoRoot, pkgPath string, s *store.Store) (*Stats, error) {
+func ParsePackage(repoRoot, pkgPath string, s *store.Store, withTests bool) (*Stats, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedTypes | packages.NeedSyntax |
 			packages.NeedTypesInfo | packages.NeedDeps,
 		Dir:   repoRoot,
-		Tests: false,
+		Tests: withTests,
 	}
 	pkgs, err := packages.Load(cfg, pkgPath)
 	if err != nil {

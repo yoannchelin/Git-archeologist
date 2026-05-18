@@ -67,6 +67,7 @@ func runIndex(args []string) {
 	repo := fs.String("repo", ".", "path to the repo root")
 	noEmbed := fs.Bool("no-embed", false, "skip embeddings (faster, retrieval falls back to FTS+graph)")
 	noGit := fs.Bool("no-git", false, "skip git history ingestion")
+	withTests := fs.Bool("with-tests", false, "index _test.go files (slower parse, but tests document usage)")
 	ollama := fs.String("ollama", "http://127.0.0.1:11434", "Ollama base URL")
 	chatModel := fs.String("chat-model", "qwen2.5-coder:14b", "Ollama model for chat (used by MCP server, not by index)")
 	embedModel := fs.String("embed-model", "nomic-embed-text", "Ollama model for embeddings")
@@ -94,6 +95,7 @@ func runIndex(args []string) {
 	opt := index.Options{
 		WithGit:        !*noGit,
 		WithEmbeddings: !*noEmbed,
+		WithTests:      *withTests,
 		MaxCommits:     *maxCommits,
 	}
 
