@@ -70,6 +70,7 @@ func Build(
 	} else {
 		report.ParseStats.Files += tsStats.Files
 		report.ParseStats.Symbols += tsStats.Symbols
+		report.ParseStats.CallEdges += tsStats.CallEdges
 		report.ParseStats.ImportEdges += tsStats.ImportEdges
 		report.ParseErrors = append(report.ParseErrors, tsStats.Errors...)
 	}
