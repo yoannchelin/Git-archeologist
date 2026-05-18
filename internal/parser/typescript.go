@@ -85,6 +85,7 @@ func ParseTS(repoRoot string, s *store.Store) (*Stats, error) {
 			Package:  dir,
 			LOC:      len(lines),
 			Language: "typescript",
+			IsTest:   isTSTestFile(relPath),
 		})
 		if err != nil {
 			_ = batch.Rollback()
@@ -305,24 +306,60 @@ func extractTSImports(src string) []string {
 }
 
 // resolveImport resolves a TypeScript relative import specifier to an absolute
-// path by trying common extensions (.ts, .tsx, index.ts, index.tsx).
+// path. Handles three common patterns:
+//   - Bare specifier: `from "./checker"` → checker.ts / checker.tsx
+//   - ESM .js alias: `from "./checker.js"` → checker.ts (TS ESM convention)
+//   - Directory: `from "./utils"` → utils/index.ts
 func resolveImport(fromAbs, imp string) string {
 	dir := filepath.Dir(fromAbs)
 	base := filepath.Join(dir, filepath.FromSlash(imp))
-	for _, ext := range []string{".ts", ".tsx", ".js", ".jsx"} {
-		p := base + ext
-		if _, err := os.Stat(p); err == nil {
+
+	// ESM TypeScript convention: import specifiers end in .js but the source
+	// file is .ts (e.g. `from "./checker.js"` → checker.ts).
+	if strings.HasSuffix(imp, ".js") || strings.HasSuffix(imp, ".jsx") {
+		stem := strings.TrimSuffix(strings.TrimSuffix(base, ".jsx"), ".js")
+		for _, ext := range []string{".ts", ".tsx"} {
+			if p := stem + ext; fileExists(p) {
+				return p
+			}
+		}
+	}
+
+	// Bare specifier: append common source extensions.
+	for _, ext := range []string{".ts", ".tsx"} {
+		if p := base + ext; fileExists(p) {
 			return p
 		}
 	}
-	// Try index file in the imported directory.
+
+	// Directory import: look for index file.
 	for _, ext := range []string{".ts", ".tsx"} {
-		p := filepath.Join(base, "index"+ext)
-		if _, err := os.Stat(p); err == nil {
+		if p := filepath.Join(base, "index"+ext); fileExists(p) {
 			return p
 		}
 	}
 	return ""
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// isTSTestFile returns true for files that are likely test/spec files.
+func isTSTestFile(relPath string) bool {
+	parts := strings.Split(filepath.ToSlash(relPath), "/")
+	for _, p := range parts {
+		switch p {
+		case "test", "tests", "__tests__", "spec", "specs", "e2e", "__mocks__":
+			return true
+		}
+	}
+	base := filepath.Base(relPath)
+	return strings.HasSuffix(base, ".test.ts") ||
+		strings.HasSuffix(base, ".spec.ts") ||
+		strings.HasSuffix(base, ".test.tsx") ||
+		strings.HasSuffix(base, ".spec.tsx")
 }
 
 // cleanJSDoc strips /** ... */ markers from a single-line comment block.
