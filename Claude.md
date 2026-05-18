@@ -7,7 +7,7 @@
 
 ## 1. Le projet en une phrase
 
-**Git Archaeologist** est un **serveur MCP** qui indexe un repo **Go** et permet à n'importe quel client MCP (Claude Desktop, Zed, Cursor…) de comprendre ce repo en posant des questions en langage naturel. Tout tourne **en local** via **Ollama** — aucune ligne de code ne quitte la machine.
+**Git Archaeologist** est un **serveur MCP** qui indexe un repo **Go ou TypeScript** et permet à n'importe quel client MCP (Claude Desktop, Zed, Cursor…) de comprendre ce repo en posant des questions en langage naturel. Tout tourne **en local** via **Ollama** — aucune ligne de code ne quitte la machine.
 
 Use case prioritaire : **onboarding** — un dev rejoint une équipe, balance le repo à l'agent, et peut demander *"où est géré le paiement ?"* ou *"quels fichiers toucher pour ajouter un nouveau provider d'auth ?"*.
 
@@ -19,11 +19,12 @@ Ces choix ont été pris consciemment au début du projet. Si tu veux en changer
 
 | Décision | Raison |
 |---|---|
-| **Go, un seul langage** au MVP | Niche-down. Le marché Go (k8s, Terraform, infra) est gros et mal outillé. Multi-langage via tree-sitter = S2. |
+| **Go comme langage primaire** | Niche-down. Le marché Go (k8s, Terraform, infra) est gros et mal outillé. Seul Go bénéficie du call graph typé. |
+| **TypeScript via regexp** (S1 livré) | Pas de tree-sitter : zéro CGo, zéro grammar à maintenir. On extrait fonctions/classes/interfaces/imports au niveau top-level — suffisant pour l'onboarding. Call graph TS = S2. |
 | **`go/packages` + `go/types`**, pas tree-sitter | Tree-sitter perd la résolution de types → pas de call graph précis ni d'implémentations d'interfaces. C'est le différenciateur vs RAG générique. |
 | **MCP server stdio** comme interface primaire | Branchable partout. VSCode / web dashboard = S2. |
 | **Ollama** comme LLM, pas Claude API | Demande du user : tout en local, repos confidentiels OK. Llama.cpp / API distante = derrière l'interface `llm.Client`. |
-| **SQLite unique** (graph + FTS5 + embeddings + git) | Zero infra. Brute-force cosine OK jusqu'à ~100k symboles. `sqlite-vec` ou Qdrant si on cogne un mur. |
+| **SQLite unique** (graph + FTS5 + embeddings + git) | Zero infra. Cosine via fonction C enregistrée (`store/vec.go`) — OK jusqu'à ~250k symboles. sqlite-vec HNSW si on dépasse. |
 | **Retrieval hybride** : vector + FTS5 + graph expansion | C'est le secret sauce. Le RAG naïf rate "payment" si le code dit `ChargeCustomer()`. Le graph rattrape. Voir `internal/retrieve/retrieve.go`. |
 | **Embedder funcs + types + interfaces + files**, pas packages ni vars/consts | Sweet spot granularité/coût. |
 | **Texte d'embedding composite** = `kind + qualified + signature + doc + ~80 premières lignes de body` | Doc = intent, signature = shape, code prefix = structure. Pas tout le body : dilue le vecteur. |
@@ -53,11 +54,13 @@ internal/
   store/            SQLite : schéma + helpers typés + embeddings storage
                     - schema.go : DDL complet (tables + FTS5 + triggers)
                     - store.go  : Open, BatchInsert, SearchFTS, Neighbors,
-                                  NearestNeighbors (brute-force cosine)
+                                  NearestNeighbors (cosine via SQL function)
+                    - vec.go    : driver "sqlite3_archaeo" + cosine_sim() C func
                     - sort.go   : helper de tri
-  parser/           go/packages → symboles + edges
+  parser/           go/packages → symboles + edges (Go)
+                    typescript.go → symboles + import edges (TS/TSX, regexp)
                     Passe 1 : files + symbols
-                    Passe 2 : edges (calls, implements)
+                    Passe 2 : edges (calls, implements pour Go ; imports pour TS)
                     - parser_test.go : smoke test sur testdata/sample
   gitlog/           go-git → commits + churn par fichier
                     HotFiles() = top fichiers par churn (proxy de risque)
@@ -71,7 +74,7 @@ internal/
 testdata/sample/    Petit repo Go (payment.go) pour les tests
 ```
 
-**Schéma SQLite** (clé du système) : `files`, `symbols`, `edges`, `embeddings`, `symbols_fts` (FTS5 contentless mirror de `symbols`), `commits`, `file_commits`, `meta`. Relations dans `edges` : `calls`, `implements`, `contains`. Détail complet dans `internal/store/schema.go`.
+**Schéma SQLite** (clé du système) : `files`, `symbols`, `edges`, `embeddings`, `symbols_fts` (FTS5 contentless mirror de `symbols`), `commits`, `file_commits`, `meta`. `files` a une colonne `language` (`go` / `typescript`). Relations dans `edges` : `calls`, `implements`, `contains`, `imports`, `embeds`. Détail complet dans `internal/store/schema.go`.
 
 ---
 
@@ -94,35 +97,36 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 ### ✅ Implémenté et testé en exécution
 - Schéma SQLite complet avec FTS5 + triggers de sync
-- Parser Go avec call graph et impl edges (interfaces)
+- Parser Go avec call graph et impl edges (interfaces), `imports` et `embeds`
+- Parser TypeScript/TSX (regexp, zéro CGo) — fonctions, classes, interfaces, type aliases, import edges
 - Ingest Git avec churn par fichier
 - Client Ollama (embed + chat)
-- Pipeline d'embedding
-- Retrieval hybride (vector + FTS + graph)
-- Orchestrateur d'indexation
+- Pipeline d'embedding + `RunPackage` pour embedding incrémental par package
+- Retrieval hybride (vector + FTS + graph) avec freshness boost (+0.15 pour fichiers récents)
+- Orchestrateur d'indexation + watcher `fsnotify` incrémental
 - CLI `archaeo` (index / info / query)
 - Serveur MCP stdio avec les 6 tools (dont `diagram`)
-- Outil `diagram` : call graph Mermaid + package deps — testé via JSON-RPC stdio
+- `find_entrypoints` étendu : HTTP routes + Cobra commands + gRPC services
+- Cosine similarity via fonction C SQLite (`store/vec.go`) — ~10× plus rapide, zéro allocation Go
 - Smoke test sur `testdata/sample/payment.go` (`make test` passe)
+- Testé sur microsoft/TypeScript (21 121 fichiers, 3.2s, 2025 import edges)
 - README + Makefile (avec `-tags fts5`)
 
 ### ❌ À faire (ordre = ROI décroissant)
 
-1. ~~**Génération de diagrammes Mermaid**~~ — **FAIT** (`internal/mcpserver/diagram.go`)
+1. ~~**Génération de diagrammes Mermaid**~~ — **FAIT**
+2. ~~**Indexation incrémentale via `fsnotify`**~~ — **FAIT**
+3. ~~**Cosine similarity en C via ConnectHook**~~ — **FAIT** (`store/vec.go`). Pour aller plus loin : sqlite-vec HNSW au-delà de ~250k symboles.
+4. ~~**Plus de relations dans le graphe**~~ — **FAIT** (`imports`, `embeds`)
+5. ~~**Détection d'entrypoints plus fine**~~ — **FAIT** (Cobra, gRPC ajoutés). Reste : schedulers (`robfig/cron`), workers (`go func()` dans `main`).
 
-2. **Indexation incrémentale via `fsnotify`** (1 journée) — détecter les modifs de fichiers `.go`, ré-parser le seul package touché, mettre à jour symboles + edges entrants/sortants. Essentiel dès qu'on dépasse la démo.
+6. **Tests d'intégration sur 3 vrais repos Go** : Kubernetes (énorme), Terraform (moyen), Hugo (petit). Mesurer : temps d'index, qualité du retrieval sur 10 questions templates.
 
-3. **`sqlite-vec` auto-load** (1/2 journée) — passer la recherche vectorielle de brute-force à indexée. Nécessaire au-delà de ~50k symboles. Le SQL change peu, juste l'extension à charger via `_extensions` dans le DSN sqlite3.
+7. **Re-ranker plus malin** — intégrer la centralité PageRank dans le graphe. La fraîcheur Git est déjà là (+0.15).
 
-4. ~~**Plus de relations dans le graphe**~~ — **FAIT** (`imports` et `embeds` ajoutés dans `internal/parser/parser.go`, pass 2). Reste : `uses` (func → var/const lus).
+8. **Support des `_test.go`** — actuellement exclus. Les tests sont souvent la *meilleure* doc d'un module. À réintégrer avec un flag `--with-tests`.
 
-5. **Détection d'entrypoints plus fine** — actuellement heuristiques sur signature. Améliorer : détecter `mux.HandleFunc`, `gin.Engine.GET/POST/...`, `cobra.Command`, schedulers (`robfig/cron`), workers (`go func()` dans `main`).
-
-6. **Tests d'intégration sur 3 vrais repos** : Kubernetes (énorme), Terraform (moyen), Hugo (petit). Mesurer : temps d'index, qualité du retrieval sur 10 questions templates.
-
-7. **Re-ranker plus malin** — au-delà du score linéaire, intégrer la centralité du nœud dans le graphe (PageRank simple) et la fraîcheur Git (récent = plus pertinent).
-
-8. **Support des tests** — actuellement on exclut `_test.go`. Les tests sont souvent la *meilleure* doc d'un module. À réintégrer avec un flag `--with-tests`.
+9. **Call graph TypeScript** — actuellement on a les import edges mais pas les call edges (qui appelle quoi). Nécessite de parser les corps de fonctions, ce qui sort du regexp simple → tree-sitter ou analyse heuristique des call sites.
 
 ---
 
@@ -138,6 +142,10 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 - **`go/packages` charge tous les imports avec `NeedDeps`**. Sur un gros repo, ça peut consommer beaucoup de RAM. À surveiller, possibilité de retirer `NeedDeps` si problème (au prix de la résolution cross-package).
 - **`go-git` `ForEach` sentinel** : c'est `storer.ErrStop` (depuis `plumbing/storer`), pas une erreur custom. Erreur fréquente.
 - **`make build` ne mettait pas à jour `bin/`** — le target compilait avec `go build ./...` sans `-o`. Maintenant `build` délègue à `bin/archaeo` et `bin/archaeo-mcp`. Toujours vérifier que le bon binaire est utilisé lors du debug.
+- **TypeScript ESM : les imports `.js` pointent vers des fichiers `.ts`** — depuis TS 4.x en mode ESM, les import specifiers utilisent `.js` même si le fichier source est `.ts` (ex: `from "./checker.js"` → `checker.ts`). `resolveImport` dans `typescript.go` gère ça en strippant `.js` et cherchant `.ts`/`.tsx`. Ne pas oublier ce cas si on touche la résolution d'imports TS.
+- **Les fichiers de test TS ne suivent pas tous le pattern `_test.go`** — il faut détecter les dossiers (`tests/`, `__tests__`, `spec/`, `e2e/`, `__mocks__`) ET les suffixes (`.test.ts`, `.spec.ts`). Voir `isTSTestFile()` dans `typescript.go`. Sans ça, les milliers de cas de test du repo TypeScript (microsoft/TypeScript) noient les vrais résultats de retrieval.
+- **`cosine_sim` enregistré via ConnectHook** : le driver s'appelle `"sqlite3_archaeo"` (pas `"sqlite3"`). Si tu ajoutes d'autres tests ou outils qui ouvrent une DB directement, ils doivent utiliser ce driver, sinon `cosine_sim` n'est pas disponible et les queries vectorielles échouent.
+- **FTS seul ne suffit pas pour le sémantique** — testé sur microsoft/TypeScript : "where is parsing done" ne trouve pas `parser.ts` en #1 sans embeddings. Le FTS stemme "parsing" → "pars" mais les 20k fichiers de test avec "pars" dans le nom noient le signal. Les embeddings (Ollama) sont indispensables pour la qualité sémantique.
 
 ---
 
@@ -205,6 +213,6 @@ ollama pull nomic-embed-text
 
 1. Lis ce fichier **en entier**.
 2. Demande à l'utilisateur : *"On reprend où ? J'ai vu dans Claude.md qu'il reste X, Y, Z à faire — tu veux attaquer lequel, ou tu as un autre angle ?"*
-3. Si l'utilisateur dit *"continue"* sans préciser, propose la feature 1 de la section 6 (diagrammes Mermaid) — c'est le meilleur ROI.
+3. Si l'utilisateur dit *"continue"* sans préciser, propose l'item 6 de la section 6 (tests d'intégration Go) ou l'item 7 (PageRank) — c'est le meilleur ROI restant.
 4. Avant d'écrire du code, `view` les fichiers concernés pour t'aligner sur le code actuel.
 5. Travaille. Mets à jour `Claude.md` à la fin si tu as appris quelque chose.
