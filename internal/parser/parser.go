@@ -37,28 +37,44 @@ type Stats struct {
 	Errors      []string
 }
 
-// Parse loads all Go packages under repoRoot and writes symbols + edges to s.
+// ParseConfig controls the behaviour of Parse and ParsePackage.
+type ParseConfig struct {
+	// WithTests includes _test.go files. Roughly doubles load time.
+	WithTests bool
+	// Fast skips NeedDeps/NeedTypes/NeedTypesInfo. Call edges and impl edges
+	// are not extracted but symbol extraction and embeddings still work.
+	// ~3-5× faster on repos with heavy external dependencies.
+	Fast bool
+	// LoadDir is the directory passed to packages.Load as Dir.
+	// Leave empty to use repoRoot (the default for single-module repos).
+	// Set to the module root when indexing one workspace module at a time.
+	LoadDir string
+}
+
+// Parse walks a Go module rooted at loadDir (or repoRoot when LoadDir is
+// empty) and writes symbols + edges into s.
 //
-// The function is intentionally single-shot: it tears down and rebuilds the
-// portion of the graph it owns. Incremental indexing is a follow-up; getting
-// the model right matters more than incrementality at MVP.
-// Parse walks a Go repository and indexes all symbols and edges.
-//
-// withTests controls whether _test.go files are included. Enabling it roughly
-// doubles packages.Load time but surfaces test helpers and usage examples —
-// valuable for onboarding questions like "how do I use package X?". Test
-// symbols receive the standard is_test penalty in retrieval so they don't
-// crowd out production code.
-func Parse(repoRoot string, s *store.Store, withTests bool) (*Stats, error) {
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
-			packages.NeedImports | packages.NeedTypes | packages.NeedSyntax |
-			packages.NeedTypesInfo | packages.NeedDeps,
-		Dir:   repoRoot,
-		Tests: withTests,
+// File paths stored in the DB are always relative to repoRoot so that a
+// workspace index (multiple modules) shares a common path namespace.
+func Parse(repoRoot string, s *store.Store, cfg ParseConfig) (*Stats, error) {
+	loadDir := cfg.LoadDir
+	if loadDir == "" {
+		loadDir = repoRoot
 	}
 
-	pkgs, err := packages.Load(cfg, "./...")
+	mode := packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+		packages.NeedImports | packages.NeedSyntax
+	if !cfg.Fast {
+		mode |= packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps
+	}
+
+	pkgCfg := &packages.Config{
+		Mode:  mode,
+		Dir:   loadDir,
+		Tests: cfg.WithTests,
+	}
+
+	pkgs, err := packages.Load(pkgCfg, "./...")
 	if err != nil {
 		return nil, fmt.Errorf("packages.Load: %w", err)
 	}
@@ -545,15 +561,18 @@ func isGenerated(file *ast.File) bool {
 // Cross-package call edges from this package to others are not regenerated
 // here — they will be correct after a full `Parse` run. For day-to-day
 // incremental updates (function bodies, signatures, docs) this is fine.
-func ParsePackage(repoRoot, pkgPath string, s *store.Store, withTests bool) (*Stats, error) {
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
-			packages.NeedImports | packages.NeedTypes | packages.NeedSyntax |
-			packages.NeedTypesInfo | packages.NeedDeps,
-		Dir:   repoRoot,
-		Tests: withTests,
+func ParsePackage(repoRoot, pkgPath string, s *store.Store, cfg ParseConfig) (*Stats, error) {
+	mode := packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+		packages.NeedImports | packages.NeedSyntax
+	if !cfg.Fast {
+		mode |= packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps
 	}
-	pkgs, err := packages.Load(cfg, pkgPath)
+	pkgCfg := &packages.Config{
+		Mode:  mode,
+		Dir:   repoRoot,
+		Tests: cfg.WithTests,
+	}
+	pkgs, err := packages.Load(pkgCfg, pkgPath)
 	if err != nil {
 		return nil, fmt.Errorf("packages.Load %s: %w", pkgPath, err)
 	}

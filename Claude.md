@@ -134,7 +134,11 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 8. ~~**Support des `_test.go`**~~ — **FAIT** : flag `--with-tests` sur `archaeo index` et `archaeo-mcp`. Symbols marqués `is_test`, pénalité 0.4× en retrieval.
 
-9. **Call graph TypeScript** — actuellement import edges seulement. Approche : scan heuristique des corps de fonctions pour les call sites (`identifier(`), résolution within-file d'abord, puis same-package. Cross-file via import edges déjà existants.
+9. ~~**`--fast` mode (skip `NeedDeps`)**~~ — **FAIT** : flag `--fast` sur `archaeo index` et `archaeo-mcp --fast`. `ParseConfig.Fast` retire `NeedDeps|NeedTypes|NeedTypesInfo` de `packages.Config.Mode`. Résultat : Terraform 63s → ~15s, au prix de l'absence de call/impl edges cross-package. À utiliser pour découverte rapide.
+
+10. ~~**go.work multi-module**~~ — **FAIT** : `parseGoWorkDirs()` dans `index/index.go` lit les directives `use` de `go.work`. `Build` itère chaque module dir en passant `ParseConfig.LoadDir`. Les chemins de fichiers restent relatifs à `repoRoot` (unchanged). Kubernetes/staging maintenant entièrement couvert.
+
+11. **Call graph TypeScript** — actuellement import edges seulement. Approche : scan heuristique des corps de fonctions pour les call sites (`identifier(`), résolution within-file d'abord, puis same-package. Cross-file via import edges déjà existants.
 
 ---
 
@@ -154,8 +158,8 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 - **Les fichiers de test TS ne suivent pas tous le pattern `_test.go`** — il faut détecter les dossiers (`tests/`, `__tests__`, `spec/`, `e2e/`, `__mocks__`) ET les suffixes (`.test.ts`, `.spec.ts`). Voir `isTSTestFile()` dans `typescript.go`. Sans ça, les milliers de cas de test du repo TypeScript (microsoft/TypeScript) noient les vrais résultats de retrieval.
 - **`cosine_sim` enregistré via ConnectHook** : le driver s'appelle `"sqlite3_archaeo"` (pas `"sqlite3"`). Si tu ajoutes d'autres tests ou outils qui ouvrent une DB directement, ils doivent utiliser ce driver, sinon `cosine_sim` n'est pas disponible et les queries vectorielles échouent.
 - **FTS seul ne suffit pas pour le sémantique** — testé sur microsoft/TypeScript : "where is parsing done" ne trouve pas `parser.ts` en #1 sans embeddings. Le FTS stemme "parsing" → "pars" mais les 20k fichiers de test avec "pars" dans le nom noient le signal. Les embeddings (Ollama) sont indispensables pour la qualité sémantique.
-- **Terraform est lent à indexer (~63s pour 1200 fichiers)** — `NeedDeps` dans `packages.Load` force Go à type-checker toutes les dépendances externes (Terraform en a beaucoup : AWS SDK, Azure SDK, etc.). Solution possible : retirer `NeedDeps` pour sacrifier la résolution cross-package (au prix d'un call graph moins précis). À faire si quelqu'un se plaint de la vitesse.
-- **Repos multi-modules avec `go.work`** (ex : Kubernetes) : seul le module principal est indexé. Les sous-modules dans `staging/` ne sont pas chargés. `go/packages` ne traverse pas automatiquement un workspace. Workaround : lancer `archaeo index` séparément dans chaque sous-module, ou détecter `go.work` et charger chaque module listé. Documenté comme limitation connue.
+- **Terraform lent à indexer** — résolu via `--fast` flag (`ParseConfig.Fast`). Sans `NeedDeps|NeedTypes|NeedTypesInfo`, le type-checker externe est éliminé : ~15s au lieu de 63s. Contrepartie : pas de call/impl edges cross-package. Pour les gros repos avec beaucoup de dépendances externes, recommander `--fast` en première passe.
+- **Repos multi-modules avec `go.work`** — résolu : `parseGoWorkDirs()` dans `index/index.go` détecte `go.work` et itère chaque module. La fonction `Build` passe `ParseConfig.LoadDir` pour chaque répertoire de module. Kubernetes/staging entièrement couvert. Si `go.work` absent : comportement single-module inchangé.
 
 ---
 
