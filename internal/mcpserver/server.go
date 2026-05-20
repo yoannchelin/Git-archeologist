@@ -116,12 +116,14 @@ func (s *Server) handleQuery(
 type EntrypointsInput struct{}
 
 type EntrypointsOutput struct {
-	Mains         []SymbolBrief `json:"mains"`
-	Inits         []SymbolBrief `json:"inits"`
-	HTTPRoutes    []SymbolBrief `json:"http_routes,omitempty"`
-	CobraCommands []SymbolBrief `json:"cobra_commands,omitempty"`
-	GRPCServices  []SymbolBrief `json:"grpc_services,omitempty"`
-	Description   string        `json:"description"`
+	Mains             []SymbolBrief `json:"mains"`
+	Inits             []SymbolBrief `json:"inits"`
+	HTTPRoutes        []SymbolBrief `json:"http_routes,omitempty"`
+	CobraCommands     []SymbolBrief `json:"cobra_commands,omitempty"`
+	GRPCServices      []SymbolBrief `json:"grpc_services,omitempty"`
+	GoroutineWorkers  []SymbolBrief `json:"goroutine_workers,omitempty"`
+	CronJobs          []SymbolBrief `json:"cron_jobs,omitempty"`
+	Description       string        `json:"description"`
 }
 
 func (s *Server) handleEntrypoints(
@@ -130,7 +132,7 @@ func (s *Server) handleEntrypoints(
 	_ EntrypointsInput,
 ) (*mcp.CallToolResult, EntrypointsOutput, error) {
 	out := EntrypointsOutput{
-		Description: "Entrypoints of the repository. main() functions are the binary entry; init() functions run at package load. HTTP routes, Cobra commands, and gRPC services are detected heuristically.",
+		Description: "Entrypoints of the repository. main() functions are the binary entry; init() functions run at package load. HTTP routes, Cobra commands, gRPC services, goroutine workers (go keyword), and cron-scheduled jobs are detected heuristically.",
 	}
 
 	// main() functions
@@ -207,6 +209,36 @@ func (s *Server) handleEntrypoints(
 		grpcs, _ := briefsFromRows(s.Store, rows)
 		rows.Close()
 		out.GRPCServices = grpcs
+	}
+
+	// Goroutine workers: functions launched with the `go` keyword.
+	rows, err = s.Store.DB().Query(`
+		SELECT DISTINCT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
+		       s.line_start, s.line_end, s.signature, s.doc, s.exported
+		FROM symbols s
+		JOIN edges e ON e.dst = s.id
+		WHERE e.relation = 'spawns'
+		ORDER BY s.qualified
+		LIMIT 50`)
+	if err == nil {
+		workers, _ := briefsFromRows(s.Store, rows)
+		rows.Close()
+		out.GoroutineWorkers = workers
+	}
+
+	// Cron jobs: functions registered as callbacks with a cron library.
+	rows, err = s.Store.DB().Query(`
+		SELECT DISTINCT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
+		       s.line_start, s.line_end, s.signature, s.doc, s.exported
+		FROM symbols s
+		JOIN edges e ON e.dst = s.id
+		WHERE e.relation = 'schedules'
+		ORDER BY s.qualified
+		LIMIT 30`)
+	if err == nil {
+		jobs, _ := briefsFromRows(s.Store, rows)
+		rows.Close()
+		out.CronJobs = jobs
 	}
 
 	return nil, out, nil

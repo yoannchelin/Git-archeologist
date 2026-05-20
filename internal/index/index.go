@@ -82,6 +82,8 @@ func Build(
 		pstats.Files += ms.Files
 		pstats.Symbols += ms.Symbols
 		pstats.CallEdges += ms.CallEdges
+		pstats.SpawnEdges += ms.SpawnEdges
+		pstats.ScheduleEdges += ms.ScheduleEdges
 		pstats.ImplEdges += ms.ImplEdges
 		pstats.ImportEdges += ms.ImportEdges
 		pstats.EmbedEdges += ms.EmbedEdges

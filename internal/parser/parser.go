@@ -27,14 +27,16 @@ import (
 
 // Stats summarizes what the parser found.
 type Stats struct {
-	Packages    int
-	Files       int
-	Symbols     int
-	CallEdges   int
-	ImplEdges   int
-	ImportEdges int
-	EmbedEdges  int
-	Errors      []string
+	Packages      int
+	Files         int
+	Symbols       int
+	CallEdges     int
+	ImplEdges     int
+	ImportEdges   int
+	EmbedEdges    int
+	SpawnEdges    int
+	ScheduleEdges int
+	Errors        []string
 }
 
 // ParseConfig controls the behaviour of Parse and ParsePackage.
@@ -204,32 +206,7 @@ func Parse(repoRoot string, s *store.Store, cfg ParseConfig) (*Stats, error) {
 		// call edges — use pre-computed function ranges per file to avoid O(n²)
 		// AST walks (old enclosingFunc re-walked the file for every call site).
 		for _, file := range pkg.Syntax {
-			funcRanges := buildFuncRanges(file, pkg.TypesInfo)
-			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				callee := resolveCallee(call.Fun, pkg.TypesInfo)
-				if callee == nil {
-					return true
-				}
-				caller := enclosingFuncFast(funcRanges, call.Pos())
-				if caller == nil {
-					return true
-				}
-				srcID, okSrc := symIDs[caller]
-				dstID, okDst := symIDs[callee]
-				if !okSrc || !okDst {
-					return true
-				}
-				if err := batch.PutEdge(store.Edge{
-					Src: srcID, Dst: dstID, Relation: "calls", Weight: 1,
-				}); err == nil {
-					stats.CallEdges++
-				}
-				return true
-			})
+			emitFileEdges(file, pkg.TypesInfo, symIDs, batch, stats)
 		}
 
 		// interface implementations: for every defined interface in this pkg,
@@ -677,36 +654,145 @@ func ParsePackage(repoRoot, pkgPath string, s *store.Store, cfg ParseConfig) (*S
 	}
 	if target.TypesInfo != nil {
 		for _, file := range target.Syntax {
-			funcRanges := buildFuncRanges(file, target.TypesInfo)
-			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				callee := resolveCallee(call.Fun, target.TypesInfo)
-				if callee == nil {
-					return true
-				}
-				caller := enclosingFuncFast(funcRanges, call.Pos())
-				if caller == nil {
-					return true
-				}
-				srcID, okSrc := symIDs[caller]
-				dstID, okDst := symIDs[callee]
-				if !okSrc || !okDst {
-					return true
-				}
-				if err := batch.PutEdge(store.Edge{Src: srcID, Dst: dstID, Relation: "calls", Weight: 1}); err == nil {
-					stats.CallEdges++
-				}
-				return true
-			})
+			emitFileEdges(file, target.TypesInfo, symIDs, batch, stats)
 		}
 	}
 	if err := batch.Commit(); err != nil {
 		return nil, fmt.Errorf("commit pass 2: %w", err)
 	}
 	return stats, nil
+}
+
+// collectGoStmtPositions returns the token.Pos of every goroutine call in the file.
+// Used by emitFileEdges to distinguish `go f()` (spawns) from plain `f()` (calls).
+func collectGoStmtPositions(file *ast.File) map[token.Pos]bool {
+	out := map[token.Pos]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if gs, ok := n.(*ast.GoStmt); ok {
+			out[gs.Call.Pos()] = true
+		}
+		return true
+	})
+	return out
+}
+
+// cronMethods are the common method names used by cron libraries to register a job.
+var cronMethods = map[string]bool{
+	"AddFunc": true,
+	"AddJob":  true,
+	"Schedule": true,
+}
+
+// resolveCronCallback checks whether call is a cron-library registration call
+// (e.g. c.AddFunc(spec, myHandler)) and, if so, returns the types.Object for
+// the callback function argument. Returns nil for non-cron calls or when the
+// callback is an anonymous function literal (unresolvable to a named symbol).
+func resolveCronCallback(call *ast.CallExpr, info *types.Info) types.Object {
+	if info == nil {
+		return nil
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !cronMethods[sel.Sel.Name] {
+		return nil
+	}
+	obj := info.Uses[sel.Sel]
+	if obj == nil {
+		return nil
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok || fn.Pkg() == nil || !strings.Contains(fn.Pkg().Path(), "cron") {
+		return nil
+	}
+	// Walk arguments looking for a named function reference.
+	for _, arg := range call.Args {
+		var ref types.Object
+		switch a := arg.(type) {
+		case *ast.Ident:
+			ref = info.Uses[a]
+		case *ast.SelectorExpr:
+			ref = info.Uses[a.Sel]
+		}
+		if ref == nil {
+			continue
+		}
+		if _, isFn := ref.(*types.Func); isFn {
+			return ref
+		}
+	}
+	return nil
+}
+
+// emitFileEdges walks one source file and writes call/spawns/schedules edges
+// into batch. It is called from both Parse (full index) and ParsePackage
+// (incremental update) so the logic lives in one place.
+//
+// Three edge kinds:
+//   - "calls"     — ordinary function/method call
+//   - "spawns"    — call prefixed with the `go` keyword (goroutine worker)
+//   - "schedules" — function passed as callback to a cron library (e.g. robfig/cron)
+func emitFileEdges(
+	file *ast.File,
+	info *types.Info,
+	symIDs map[types.Object]int64,
+	batch *store.BatchInsert,
+	stats *Stats,
+) {
+	funcRanges := buildFuncRanges(file, info)
+	goCalls := collectGoStmtPositions(file)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		caller := enclosingFuncFast(funcRanges, call.Pos())
+		if caller == nil {
+			return true
+		}
+		srcID, okSrc := symIDs[caller]
+		if !okSrc {
+			return true
+		}
+
+		// Goroutine spawn: emit "spawns" instead of "calls" and stop here —
+		// we don't also want a "calls" edge for the same call site.
+		if goCalls[call.Pos()] {
+			if callee := resolveCallee(call.Fun, info); callee != nil {
+				if dstID, ok := symIDs[callee]; ok {
+					if err := batch.PutEdge(store.Edge{Src: srcID, Dst: dstID, Relation: "spawns", Weight: 1}); err == nil {
+						stats.SpawnEdges++
+					}
+				}
+			}
+			return true
+		}
+
+		// Cron scheduler: emit "schedules" edge from the registrar to the
+		// callback, then fall through to also emit the regular "calls" edge
+		// for the AddFunc/AddJob call itself.
+		if cb := resolveCronCallback(call, info); cb != nil {
+			if dstID, ok := symIDs[cb]; ok {
+				if err := batch.PutEdge(store.Edge{Src: srcID, Dst: dstID, Relation: "schedules", Weight: 1}); err == nil {
+					stats.ScheduleEdges++
+				}
+			}
+		}
+
+		// Regular call.
+		callee := resolveCallee(call.Fun, info)
+		if callee == nil {
+			return true
+		}
+		dstID, okDst := symIDs[callee]
+		if !okDst {
+			return true
+		}
+		if err := batch.PutEdge(store.Edge{Src: srcID, Dst: dstID, Relation: "calls", Weight: 1}); err == nil {
+			stats.CallEdges++
+		}
+		return true
+	})
 }
 
 // relTo returns p relative to base, falling back to p if relativization fails.
