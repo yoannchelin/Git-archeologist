@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git Archaeologist</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #f97316;
+    --accent2: #6366f1;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --radius: 6px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.6; min-height: 100vh; }
+
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; color: var(--accent); letter-spacing: -0.2px; }
+  header span { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+
+  nav { display: flex; border-bottom: 1px solid var(--border); padding: 0 20px; }
+  nav button {
+    background: none; border: none; color: var(--muted); padding: 10px 14px;
+    cursor: pointer; font-size: 13px; font-family: var(--font);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .tab { display: none; padding: 20px; max-width: 1100px; }
+  .tab.active { display: block; }
+
+  /* Query */
+  .search-row { display: flex; gap: 8px; margin-bottom: 20px; }
+  .search-row input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 14px; border-radius: var(--radius); font-size: 14px; font-family: var(--font);
+    outline: none; transition: border-color .15s;
+  }
+  .search-row input:focus { border-color: var(--accent2); }
+  .search-row input::placeholder { color: var(--muted); }
+  button.primary {
+    background: var(--accent2); color: #fff; border: none; padding: 10px 18px;
+    border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 500;
+    white-space: nowrap; transition: opacity .15s;
+  }
+  button.primary:hover { opacity: .85; }
+  button.primary:disabled { opacity: .5; cursor: not-allowed; }
+
+  .results { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; cursor: pointer; transition: border-color .15s;
+  }
+  .card:hover { border-color: var(--accent2); }
+  .card-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .card-name { font-weight: 600; font-size: 14px; font-family: var(--mono); }
+  .card-kind { font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; }
+  .card-score { margin-left: auto; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .card-file { font-size: 12px; color: var(--accent2); font-family: var(--mono); margin-bottom: 4px; }
+  .card-doc { font-size: 13px; color: var(--muted); }
+  .card-reasons { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .tag { font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; color: var(--muted); }
+
+  /* Architecture */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .panel h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 12px; }
+  .list-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .list-item:last-child { border-bottom: none; }
+  .list-item-name { font-family: var(--mono); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; white-space: nowrap; }
+  .hot-bar { height: 4px; background: var(--accent); border-radius: 2px; margin-top: 4px; }
+
+  /* Entrypoints */
+  .ep-section { margin-bottom: 24px; }
+  .ep-section h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .ep-empty { color: var(--muted); font-size: 13px; font-style: italic; }
+  .ep-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 6px; }
+  .ep-item-header { display: flex; gap: 8px; align-items: baseline; }
+  .ep-item-name { font-weight: 600; font-family: var(--mono); font-size: 13px; }
+  .ep-item-file { font-size: 12px; color: var(--accent2); font-family: var(--mono); margin-top: 2px; }
+  .ep-item-doc { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* Diagram */
+  .diagram-controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .diagram-controls input {
+    flex: 1; min-width: 200px; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 14px; border-radius: var(--radius); font-size: 14px;
+    font-family: var(--mono); outline: none; transition: border-color .15s;
+  }
+  .diagram-controls input:focus { border-color: var(--accent2); }
+  .diagram-controls input::placeholder { color: var(--muted); }
+  select {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: var(--radius); font-size: 13px; cursor: pointer; outline: none;
+  }
+  .depth-row { display: flex; align-items: center; gap: 8px; }
+  .depth-row label { color: var(--muted); font-size: 13px; }
+  .diagram-info { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .diagram-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; overflow-x: auto; min-height: 120px;
+  }
+  .diagram-box .mermaid { display: flex; justify-content: center; }
+  .diagram-placeholder { color: var(--muted); font-size: 13px; font-style: italic; text-align: center; padding: 40px 0; }
+
+  /* Misc */
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; padding: 20px 0; }
+  .loading { color: var(--muted); font-size: 13px; }
+  .error-msg { color: var(--red); font-size: 13px; background: #2a1010; border: 1px solid #5a2020; border-radius: var(--radius); padding: 10px 14px; }
+
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⛏ Git Archaeologist</h1>
+  <span id="repo-info">loading…</span>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('query', this)">Query</button>
+  <button onclick="showTab('architecture', this)">Architecture</button>
+  <button onclick="showTab('entrypoints', this)">Entrypoints</button>
+  <button onclick="showTab('diagram', this)">Diagram</button>
+</nav>
+
+<!-- Query tab -->
+<div id="tab-query" class="tab active">
+  <div class="search-row">
+    <input type="text" id="query-input" placeholder="where is payment handled?" autofocus
+           onkeydown="if(event.key==='Enter') doQuery()">
+    <button class="primary" id="query-btn" onclick="doQuery()">Search</button>
+  </div>
+  <div id="query-results"></div>
+</div>
+
+<!-- Architecture tab -->
+<div id="tab-architecture" class="tab">
+  <div id="arch-content" class="loading">Loading…</div>
+</div>
+
+<!-- Entrypoints tab -->
+<div id="tab-entrypoints" class="tab">
+  <div id="ep-content" class="loading">Loading…</div>
+</div>
+
+<!-- Diagram tab -->
+<div id="tab-diagram" class="tab">
+  <div class="diagram-controls">
+    <input type="text" id="diag-symbol" placeholder="pkg.FunctionName or leave empty for package deps">
+    <select id="diag-kind">
+      <option value="call_graph">Call graph</option>
+      <option value="package_deps">Package deps</option>
+    </select>
+    <div class="depth-row">
+      <label>Depth</label>
+      <select id="diag-depth">
+        <option value="1">1</option>
+        <option value="2" selected>2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+      </select>
+    </div>
+    <button class="primary" onclick="doDiagram()">Generate</button>
+  </div>
+  <div id="diag-info" class="diagram-info"></div>
+  <div class="diagram-box">
+    <div id="diag-output" class="diagram-placeholder">Enter a symbol name and click Generate.</div>
+  </div>
+</div>
+
+<script>
+mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+
+// Load repo info
+fetch('/api/architecture')
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById('repo-info').textContent =
+      `${d.packages?.length ?? 0} packages · ${d.hot_files?.length ?? 0} hot files`;
+  })
+  .catch(() => { document.getElementById('repo-info').textContent = ''; });
+
+// --- Tab switching ---
+const tabLoaded = {};
+function showTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (!tabLoaded[name]) {
+    tabLoaded[name] = true;
+    if (name === 'architecture') loadArchitecture();
+    if (name === 'entrypoints') loadEntrypoints();
+  }
+}
+
+// --- Query tab ---
+async function doQuery() {
+  const q = document.getElementById('query-input').value.trim();
+  if (!q) return;
+  const btn = document.getElementById('query-btn');
+  const out = document.getElementById('query-results');
+  btn.disabled = true;
+  btn.textContent = '…';
+  out.innerHTML = '<div class="loading">Searching…</div>';
+
+  try {
+    const r = await fetch('/api/query?q=' + encodeURIComponent(q) + '&k=20');
+    const hits = await r.json();
+    if (hits.error) { out.innerHTML = `<div class="error-msg">${esc(hits.error)}</div>`; return; }
+    if (!hits.length) { out.innerHTML = '<div class="empty">No results.</div>'; return; }
+
+    out.innerHTML = hits.map(h => `
+      <div class="card" onclick="prefillDiagram('${esc(h.qualified)}')">
+        <div class="card-header">
+          <span class="card-name">${esc(h.name)}</span>
+          <span class="card-kind">${esc(h.kind)}</span>
+          <span class="card-score">${(h.score * 100).toFixed(0)}%</span>
+        </div>
+        ${h.file ? `<div class="card-file">${esc(h.file)}${h.line ? ':' + h.line : ''}</div>` : ''}
+        ${h.doc ? `<div class="card-doc">${esc(h.doc)}</div>` : ''}
+        <div class="card-reasons">${(h.reasons || []).map(r => `<span class="tag">${esc(r)}</span>`).join('')}</div>
+      </div>`).join('');
+  } catch(e) {
+    out.innerHTML = `<div class="error-msg">Error: ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Search';
+  }
+}
+
+// --- Architecture tab ---
+async function loadArchitecture() {
+  const out = document.getElementById('arch-content');
+  try {
+    const r = await fetch('/api/architecture');
+    const d = await r.json();
+    if (d.error) { out.innerHTML = `<div class="error-msg">${esc(d.error)}</div>`; return; }
+
+    const pkgs = (d.packages || []).slice(0, 30);
+    const hot = (d.hot_files || []).slice(0, 15);
+    const maxChurn = Math.max(...hot.map(f => f.churn), 1);
+
+    out.innerHTML = `
+      <div class="two-col">
+        <div class="panel">
+          <h3>Packages</h3>
+          ${pkgs.length ? pkgs.map(p => `
+            <div class="list-item">
+              <span class="list-item-name" title="${esc(p.path)}">${esc(p.path)}</span>
+              <span class="badge">${p.symbols} sym</span>
+            </div>`).join('') : '<div class="ep-empty">No packages indexed.</div>'}
+        </div>
+        <div class="panel">
+          <h3>Hot Files (by churn)</h3>
+          ${hot.length ? hot.map(f => `
+            <div class="list-item" style="flex-direction:column;align-items:stretch;">
+              <div style="display:flex;gap:8px;align-items:baseline;">
+                <span class="list-item-name" title="${esc(f.path)}">${esc(f.path.split('/').slice(-2).join('/'))}</span>
+                <span class="badge">${f.churn} churn</span>
+                <span class="badge">${f.commits} commits</span>
+              </div>
+              <div class="hot-bar" style="width:${Math.round(f.churn/maxChurn*100)}%"></div>
+            </div>`).join('') : '<div class="ep-empty">No git history indexed.</div>'}
+        </div>
+      </div>`;
+  } catch(e) {
+    out.innerHTML = `<div class="error-msg">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// --- Entrypoints tab ---
+async function loadEntrypoints() {
+  const out = document.getElementById('ep-content');
+  try {
+    const r = await fetch('/api/entrypoints');
+    const d = await r.json();
+    if (d.error) { out.innerHTML = `<div class="error-msg">${esc(d.error)}</div>`; return; }
+
+    const sections = [
+      { key: 'mains',             title: 'main() — Binary entrypoints' },
+      { key: 'http_routes',       title: 'HTTP Handlers' },
+      { key: 'cobra_commands',    title: 'CLI Commands (Cobra)' },
+      { key: 'grpc_services',     title: 'gRPC Services' },
+      { key: 'goroutine_workers', title: 'Goroutine Workers (go keyword)' },
+      { key: 'cron_jobs',         title: 'Cron Jobs' },
+      { key: 'inits',             title: 'init() — Package side-effects' },
+    ];
+
+    out.innerHTML = sections.map(sec => {
+      const items = d[sec.key] || [];
+      if (!items.length) return '';
+      return `
+        <div class="ep-section">
+          <h3>${esc(sec.title)} <span style="font-weight:400;color:var(--muted)">(${items.length})</span></h3>
+          ${items.map(s => `
+            <div class="ep-item" onclick="prefillDiagram('${esc(s.qualified)}')">
+              <div class="ep-item-header">
+                <span class="ep-item-name">${esc(s.name)}</span>
+                <span class="card-kind">${esc(s.kind)}</span>
+              </div>
+              ${s.file ? `<div class="ep-item-file">${esc(s.file)}${s.line ? ':' + s.line : ''}</div>` : ''}
+              ${s.doc ? `<div class="ep-item-doc">${esc(s.doc)}</div>` : ''}
+            </div>`).join('')}
+        </div>`;
+    }).join('') || '<div class="empty">No entrypoints detected.</div>';
+  } catch(e) {
+    out.innerHTML = `<div class="error-msg">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// --- Diagram tab ---
+async function doDiagram() {
+  const symbol = document.getElementById('diag-symbol').value.trim();
+  const kind   = document.getElementById('diag-kind').value;
+  const depth  = document.getElementById('diag-depth').value;
+  const info   = document.getElementById('diag-info');
+  const out    = document.getElementById('diag-output');
+
+  out.innerHTML = '<div class="diagram-placeholder">Generating…</div>';
+  info.textContent = '';
+
+  const params = new URLSearchParams({ symbol, kind, depth });
+  try {
+    const r = await fetch('/api/diagram?' + params);
+    const d = await r.json();
+    if (d.error) { out.innerHTML = `<div class="error-msg">${esc(d.error)}</div>`; return; }
+
+    info.textContent = d.description || '';
+    // Render Mermaid
+    const id = 'mermaid-' + Date.now();
+    out.innerHTML = `<div class="mermaid" id="${id}">${esc(d.mermaid)}</div>`;
+    await mermaid.run({ nodes: [document.getElementById(id)] });
+  } catch(e) {
+    out.innerHTML = `<div class="error-msg">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function prefillDiagram(qualified) {
+  document.getElementById('diag-symbol').value = qualified;
+  // Switch to diagram tab
+  const diagBtn = document.querySelector('nav button:nth-child(4)');
+  showTab('diagram', diagBtn);
+  doDiagram();
+}
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+</script>
+</body>
+</html>

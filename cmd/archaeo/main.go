@@ -6,6 +6,7 @@
 //	              [--chat-model NAME] [--embed-model NAME]
 //	archaeo info  [--repo PATH]
 //	archaeo query [--repo PATH] "your question"
+//	archaeo serve [--repo PATH] [--port 8080]
 //
 // The MCP server lives in cmd/archaeo-mcp and reads from the same DB.
 package main
@@ -14,6 +15,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 	"github.com/yoannchl/git-archaeologist/internal/llm"
 	"github.com/yoannchl/git-archaeologist/internal/retrieve"
 	"github.com/yoannchl/git-archaeologist/internal/store"
+	"github.com/yoannchl/git-archaeologist/internal/web"
 )
 
 func main() {
@@ -41,6 +44,8 @@ func main() {
 		runInfo(args)
 	case "query":
 		runQuery(args)
+	case "serve":
+		runServe(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -57,6 +62,7 @@ Subcommands:
   index   Build or refresh the index for a repo
   info    Print stats about an existing index
   query   Run an ad-hoc retrieval query (debug aid)
+  serve   Start the web dashboard (opens in browser)
 
 Run "archaeo <subcommand> -h" for flags.
 `)
@@ -191,6 +197,46 @@ func runQuery(args []string) {
 			fmt.Printf("     %s\n", doc)
 		}
 		fmt.Printf("     reasons: %s\n\n", strings.Join(h.Reasons, ", "))
+	}
+}
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	repo := fs.String("repo", ".", "path to the repo root")
+	port := fs.Int("port", 8080, "HTTP port to listen on")
+	ollama := fs.String("ollama", "http://127.0.0.1:11434", "Ollama base URL")
+	embedModel := fs.String("embed-model", "nomic-embed-text", "Ollama embedding model")
+	_ = fs.Parse(args)
+
+	root, err := filepath.Abs(*repo)
+	if err != nil {
+		die("resolve repo path: %v", err)
+	}
+	s, err := store.Open(root)
+	if err != nil {
+		die("open store: %v", err)
+	}
+	defer s.Close()
+
+	client := llm.New(*ollama, "", *embedModel)
+	srv := web.New(s, client)
+
+	addr := fmt.Sprintf(":%d", *port)
+	url := fmt.Sprintf("http://localhost:%d", *port)
+	fmt.Printf("Git Archaeologist dashboard → %s\n", url)
+	fmt.Printf("Repo: %s\nPress Ctrl+C to stop.\n", root)
+
+	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	go func() {
+		<-ctx.Done()
+		_ = httpSrv.Shutdown(context.Background())
+	}()
+
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		die("serve: %v", err)
 	}
 }
 
