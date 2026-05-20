@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS embeddings (
     model       TEXT NOT NULL
 );
 
+-- HNSW vector index via sqlite-vec. Stores unit-normalised float32[768] vectors
+-- (nomic-embed-text default) so that L2 distance ≡ cosine distance. Rowid maps
+-- 1-to-1 with symbols.id / embeddings.symbol_id. Created here; populated by
+-- PutEmbedding. Queried by NearestNeighbors when hasHNSW=true.
+-- Re-index required when switching embedding models with different dimensions.
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
+    embedding float[768]
+);
+
 -- FTS5 lexical index on symbol name + doc + signature.
 -- Contentless: we look up the row in symbols by rowid.
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(

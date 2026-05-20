@@ -24,7 +24,7 @@ Ces choix ont été pris consciemment au début du projet. Si tu veux en changer
 | **`go/packages` + `go/types`**, pas tree-sitter | Tree-sitter perd la résolution de types → pas de call graph précis ni d'implémentations d'interfaces. C'est le différenciateur vs RAG générique. |
 | **MCP server stdio** comme interface primaire | Branchable partout. VSCode / web dashboard = S2. |
 | **Ollama** comme LLM, pas Claude API | Demande du user : tout en local, repos confidentiels OK. Llama.cpp / API distante = derrière l'interface `llm.Client`. |
-| **SQLite unique** (graph + FTS5 + embeddings + git) | Zero infra. Cosine via fonction C enregistrée (`store/vec.go`) — OK jusqu'à ~250k symboles. sqlite-vec HNSW si on dépasse. |
+| **SQLite unique** (graph + FTS5 + embeddings + git) | Zero infra. Cosine via `cosine_sim()` (brute-force fallback). HNSW via sqlite-vec `vec0` (O(log n) ANN) activé automatiquement quand `vec_embeddings` est peuplé. |
 | **Retrieval hybride** : vector + FTS5 + graph expansion | C'est le secret sauce. Le RAG naïf rate "payment" si le code dit `ChargeCustomer()`. Le graph rattrape. Voir `internal/retrieve/retrieve.go`. |
 | **Embedder funcs + types + interfaces + files**, pas packages ni vars/consts | Sweet spot granularité/coût. |
 | **Texte d'embedding composite** = `kind + qualified + signature + doc + ~80 premières lignes de body` | Doc = intent, signature = shape, code prefix = structure. Pas tout le body : dilue le vecteur. |
@@ -116,7 +116,7 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 
 1. ~~**Génération de diagrammes Mermaid**~~ — **FAIT**
 2. ~~**Indexation incrémentale via `fsnotify`**~~ — **FAIT**
-3. ~~**Cosine similarity en C via ConnectHook**~~ — **FAIT** (`store/vec.go`). Pour aller plus loin : sqlite-vec HNSW au-delà de ~250k symboles.
+3. ~~**Cosine similarity en C via ConnectHook**~~ — **FAIT** (`store/vec.go`). ~~sqlite-vec HNSW~~ — **FAIT** : `vec_embeddings USING vec0(float[768])`, `PutEmbedding` écrit vecteur normalisé dans vec0, `NearestNeighbors` bascule HNSW (O(log n)) si `hasHNSW=true`, sinon cosine_sim brute-force. Backward-compatible.
 4. ~~**Plus de relations dans le graphe**~~ — **FAIT** (`imports`, `embeds`)
 5. ~~**Détection d'entrypoints plus fine**~~ — **FAIT** (Cobra, gRPC ajoutés). Reste : schedulers (`robfig/cron`), workers (`go func()` dans `main`).
 
@@ -162,6 +162,8 @@ Définis dans `internal/mcpserver/server.go` et `internal/mcpserver/diagram.go`.
 - **Les fichiers de test TS ne suivent pas tous le pattern `_test.go`** — il faut détecter les dossiers (`tests/`, `__tests__`, `spec/`, `e2e/`, `__mocks__`) ET les suffixes (`.test.ts`, `.spec.ts`). Voir `isTSTestFile()` dans `typescript.go`. Sans ça, les milliers de cas de test du repo TypeScript (microsoft/TypeScript) noient les vrais résultats de retrieval.
 - **`cosine_sim` enregistré via ConnectHook** : le driver s'appelle `"sqlite3_archaeo"` (pas `"sqlite3"`). Si tu ajoutes d'autres tests ou outils qui ouvrent une DB directement, ils doivent utiliser ce driver, sinon `cosine_sim` n'est pas disponible et les queries vectorielles échouent.
 - **`SpawnEdges`/`ScheduleEdges` doivent être agrégés dans `index/index.go`** — `Parse` retourne un `*Stats` par module, et `Build` les somme manuellement. Si tu ajoutes un champ à `Stats`, n'oublie pas de l'ajouter aussi dans le loop d'agrégation et dans le `ParseTS` block, sinon les compteurs restent à 0 dans le CLI et dans le rapport.
+- **`sqlite3_auto_extension` deprecated warning sur macOS** — Apple a déprécié les extensions globales SQLite dans son SQLite système (macOS 10.10+). Ce warning est inoffensif : `go-sqlite3` et `sqlite-vec-go-bindings/cgo` compilent leur propre copie de SQLite (amalgamation), pas celle du système. Le warning vient du header Apple inclus par le compilateur, pas d'un vrai problème.
+- **`vec_embeddings` dim fixe à 768** — la table vec0 est créée avec `float[768]` (nomic-embed-text). Si l'utilisateur change de modèle d'embedding avec une autre dim, `PutEmbedding` skipe silencieusement le vec0 insert et fall back sur cosine_sim. Pour migrer : supprimer `.archaeo/` et réindexer.
 - **Les `go func() {...}()` anonymes ne produisent pas d'edge `spawns`** — `resolveCallee` retourne nil pour les `*ast.FuncLit`, comportement voulu. Seuls les goroutines qui appellent des fonctions nommées (ex: `go worker()`) génèrent un edge.
 - **FTS seul ne suffit pas pour le sémantique** — testé sur microsoft/TypeScript : "where is parsing done" ne trouve pas `parser.ts` en #1 sans embeddings. Le FTS stemme "parsing" → "pars" mais les 20k fichiers de test avec "pars" dans le nom noient le signal. Les embeddings (Ollama) sont indispensables pour la qualité sémantique.
 - **Terraform lent à indexer** — résolu via `--fast` flag (`ParseConfig.Fast`). Sans `NeedDeps|NeedTypes|NeedTypesInfo`, le type-checker externe est éliminé : ~15s au lieu de 63s. Contrepartie : pas de call/impl edges cross-package. Pour les gros repos avec beaucoup de dépendances externes, recommander `--fast` en première passe.

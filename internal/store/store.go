@@ -17,10 +17,16 @@ import (
 
 )
 
+// vecEmbeddingDim is the fixed dimension expected by the vec_embeddings HNSW
+// table (matches nomic-embed-text output). Vectors with a different dimension
+// are silently skipped from the HNSW index and handled by cosine_sim fallback.
+const vecEmbeddingDim = 768
+
 // Store is a handle to a single repo's index database.
 type Store struct {
-	db   *sql.DB
-	path string
+	db      *sql.DB
+	path    string
+	hasHNSW bool // true once vec_embeddings contains at least one vector
 }
 
 // Symbol mirrors the `symbols` table.
@@ -82,7 +88,14 @@ func Open(repoRoot string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, path: dbPath}, nil
+	s := &Store{db: db, path: dbPath}
+	// Detect whether the HNSW index is already populated (existing index opened
+	// after a previous embed run). A quick COUNT is cheaper than a full scan.
+	var vecCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM vec_embeddings`).Scan(&vecCount); err == nil {
+		s.hasHNSW = vecCount > 0
+	}
+	return s, nil
 }
 
 // applyMigrations runs schema additions that post-date the initial Schema const.
@@ -416,26 +429,79 @@ func (s *Store) Neighbors(id int64, relation string, depth int, outgoing bool) (
 
 // --- Embeddings --------------------------------------------------------------
 
-// PutEmbedding upserts a vector for a symbol.
+// PutEmbedding upserts a vector for a symbol in both the canonical embeddings
+// table and, when the dimension matches vecEmbeddingDim, the HNSW vec0 index.
+// The vec0 insert stores a unit-normalised copy so L2 distance ≡ cosine distance.
 func (s *Store) PutEmbedding(symbolID int64, vec []float32, model string) error {
 	blob := encodeFloat32(vec)
-	_, err := s.db.Exec(`
+	if _, err := s.db.Exec(`
 		INSERT INTO embeddings(symbol_id, dim, vec, model)
 		VALUES(?, ?, ?, ?)
 		ON CONFLICT(symbol_id) DO UPDATE SET
 			dim = excluded.dim, vec = excluded.vec, model = excluded.model`,
-		symbolID, len(vec), blob, model)
-	return err
+		symbolID, len(vec), blob, model); err != nil {
+		return err
+	}
+	// Mirror into the HNSW index when the dimension matches the vec0 schema.
+	// Silently skip (don't fail) if the user is using a non-standard model dim.
+	if len(vec) == vecEmbeddingDim {
+		normBlob := encodeFloat32(normalizeVec(vec))
+		if _, err := s.db.Exec(
+			`INSERT OR REPLACE INTO vec_embeddings(rowid, embedding) VALUES (?, ?)`,
+			symbolID, normBlob,
+		); err == nil {
+			s.hasHNSW = true
+		}
+	}
+	return nil
 }
 
 // NearestNeighbors returns the k nearest embeddings to query using cosine
 // similarity.
 //
-// The inner loop runs inside SQLite's C layer via the cosine_sim() function
-// registered in vec.go, avoiding Go heap allocations for each stored vector.
-// Still O(n) scans — sufficient up to ~250k symbols. If we ever exceed that,
-// wire in sqlite-vec's vec0 virtual table for HNSW ANN search.
+// When the HNSW index is populated (hasHNSW=true) and the query dimension
+// matches vecEmbeddingDim, it delegates to the sqlite-vec vec0 virtual table
+// for O(log n) approximate nearest-neighbor search. Otherwise it falls back to
+// the O(n) cosine_sim brute-force scan — correct for any dimension and for
+// existing indexes that predate the HNSW table.
 func (s *Store) NearestNeighbors(query []float32, k int) ([]NeighborHit, error) {
+	if s.hasHNSW && len(query) == vecEmbeddingDim {
+		return s.nearestNeighborsHNSW(query, k)
+	}
+	return s.nearestNeighborsCosine(query, k)
+}
+
+// nearestNeighborsHNSW queries the vec0 HNSW index. Vectors are stored
+// unit-normalised so L2 distance equals cosine distance; we convert back:
+// for unit vectors, cosine_sim = 1 − L2²/2.
+func (s *Store) nearestNeighborsHNSW(query []float32, k int) ([]NeighborHit, error) {
+	normBlob := encodeFloat32(normalizeVec(query))
+	rows, err := s.db.Query(
+		`SELECT rowid, distance FROM vec_embeddings
+		 WHERE embedding MATCH ?
+		 ORDER BY distance LIMIT ?`,
+		normBlob, k)
+	if err != nil {
+		// vec0 may error on schema mismatch; fall back rather than propagating.
+		return s.nearestNeighborsCosine(query, k)
+	}
+	defer rows.Close()
+	hits := make([]NeighborHit, 0, k)
+	for rows.Next() {
+		var symbolID int64
+		var dist float64
+		if err := rows.Scan(&symbolID, &dist); err != nil {
+			return nil, err
+		}
+		// Convert L2 distance on unit vectors to cosine similarity.
+		cosine := 1.0 - (dist*dist)/2.0
+		hits = append(hits, NeighborHit{SymbolID: symbolID, Score: float32(cosine)})
+	}
+	return hits, rows.Err()
+}
+
+// nearestNeighborsCosine is the O(n) brute-force fallback using cosine_sim().
+func (s *Store) nearestNeighborsCosine(query []float32, k int) ([]NeighborHit, error) {
 	qBlob := encodeFloat32(query)
 	rows, err := s.db.Query(
 		`SELECT symbol_id, CAST(cosine_sim(vec, ?) AS REAL) AS score

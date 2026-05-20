@@ -1,15 +1,12 @@
-// vec.go registers a custom SQLite driver that exposes a cosine_sim(a, b)
-// scalar function.
+// vec.go registers a custom SQLite driver with two vector capabilities:
 //
-// Why a custom SQL function instead of Go brute-force?
-// The brute-force approach in NearestNeighbors allocates thousands of []float32
-// slices and pushes them through the GC. Moving the inner loop into C (via the
-// registered function) reduces GC pressure and runs ~5-10× faster on repos with
-// tens of thousands of embeddings — while keeping zero external dependencies.
+//  1. cosine_sim(a, b) scalar function — brute-force fallback, always available.
+//  2. sqlite-vec HNSW via vec0 virtual tables — used automatically once the
+//     vec_embeddings table is populated. Registered globally via Auto() so every
+//     new connection gets the extension without any per-connection setup.
 //
-// Both vector BLOBs are expected to be raw float32 little-endian (the same
-// format produced by encodeFloat32). Normalization is done inside cosine_sim so
-// callers do not need to pre-normalize stored or query vectors.
+// Both coexist on the same connection: cosine_sim stays for FTS re-ranking and
+// any path that bypasses the HNSW index; vec0 handles the ANN hot path.
 package store
 
 import (
@@ -17,15 +14,40 @@ import (
 	"encoding/binary"
 	"math"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func init() {
+	// Register sqlite-vec globally so every new SQLite connection (including the
+	// sqlite3_archaeo driver below) automatically loads the vec0 virtual-table
+	// extension. Must be called before any connection is opened.
+	sqlite_vec.Auto()
+
 	sql.Register("sqlite3_archaeo", &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
 			return conn.RegisterFunc("cosine_sim", cosineSim, true)
 		},
 	})
+}
+
+// normalizeVec returns a unit-length copy of v. Used to store normalized
+// vectors in vec_embeddings so that L2 distance on vec0 equals cosine distance.
+// Returns v unchanged if its magnitude is zero.
+func normalizeVec(v []float32) []float32 {
+	var sumSq float64
+	for _, x := range v {
+		sumSq += float64(x) * float64(x)
+	}
+	if sumSq == 0 {
+		return v
+	}
+	mag := math.Sqrt(sumSq)
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = float32(float64(x) / mag)
+	}
+	return out
 }
 
 // cosineSim returns the cosine similarity between two float32 BLOBs.
