@@ -27,6 +27,7 @@ type Store struct {
 	db      *sql.DB
 	path    string
 	hasHNSW bool // true once vec_embeddings contains at least one vector
+	hasFTS5 bool // true when the SQLite binary includes the fts5 module
 }
 
 // Symbol mirrors the `symbols` table.
@@ -84,11 +85,17 @@ func Open(repoRoot string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// fts5 is optional — not compiled into the default mattn/go-sqlite3 binary.
+	// Search falls back to LIKE queries when unavailable.
+	hasFTS5 := true
+	if _, err := db.Exec(SchemaFTS5); err != nil {
+		hasFTS5 = false
+	}
 	if err := applyMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	s := &Store{db: db, path: dbPath}
+	s := &Store{db: db, path: dbPath, hasFTS5: hasFTS5}
 	// Detect whether the HNSW index is already populated (existing index opened
 	// after a previous embed run). A quick COUNT is cheaper than a full scan.
 	var vecCount int
@@ -339,9 +346,33 @@ func (s *Store) RecentFileIDs(days int) (map[int64]bool, error) {
 	return out, rows.Err()
 }
 
-// SearchFTS runs a lexical search over symbols. `query` follows FTS5 syntax.
-// Returns up to `limit` symbols ordered by bm25.
+// SearchFTS runs a lexical search over symbols using FTS5 when available,
+// falling back to a LIKE scan when the SQLite binary lacks the fts5 module.
 func (s *Store) SearchFTS(query string, limit int) ([]Symbol, error) {
+	if !s.hasFTS5 {
+		// Strip FTS5 syntax characters and do a case-insensitive LIKE search.
+		bare := strings.Trim(query, `"*^~`)
+		rows, err := s.db.Query(`
+			SELECT id, kind, name, qualified, COALESCE(file_id, 0),
+			       line_start, line_end, signature, doc, exported, pagerank
+			FROM symbols
+			WHERE name LIKE ? OR qualified LIKE ?
+			ORDER BY name
+			LIMIT ?`, "%"+bare+"%", "%"+bare+"%", limit)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []Symbol
+		for rows.Next() {
+			sym, err := scanSymbol(rows)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, *sym)
+		}
+		return out, rows.Err()
+	}
 	rows, err := s.db.Query(`
 		SELECT s.id, s.kind, s.name, s.qualified, COALESCE(s.file_id, 0),
 		       s.line_start, s.line_end, s.signature, s.doc, s.exported, s.pagerank

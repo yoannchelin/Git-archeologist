@@ -13,6 +13,33 @@ package store
 //
 // We intentionally keep the schema small. Anything that can be recomputed
 // from these tables (call depth, centrality, hotness score) lives in code.
+// SchemaFTS5 holds the FTS5 virtual table and its maintenance triggers.
+// Applied separately from Schema so that Store.Open degrades gracefully when
+// the SQLite binary is compiled without fts5 (e.g., in CI or test environments
+// that use the default mattn/go-sqlite3 without the fts5 build tag).
+const SchemaFTS5 = `
+CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+    name, qualified, doc, signature,
+    content='symbols', content_rowid='id',
+    tokenize = 'porter unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+    INSERT INTO symbols_fts(rowid, name, qualified, doc, signature)
+    VALUES (new.id, new.name, new.qualified, new.doc, new.signature);
+END;
+CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified, doc, signature)
+    VALUES('delete', old.id, old.name, old.qualified, old.doc, old.signature);
+END;
+CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified, doc, signature)
+    VALUES('delete', old.id, old.name, old.qualified, old.doc, old.signature);
+    INSERT INTO symbols_fts(rowid, name, qualified, doc, signature)
+    VALUES (new.id, new.name, new.qualified, new.doc, new.signature);
+END;
+`
+
 const Schema = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -80,29 +107,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
     embedding float[768]
 );
-
--- FTS5 lexical index on symbol name + doc + signature.
--- Contentless: we look up the row in symbols by rowid.
-CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
-    name, qualified, doc, signature,
-    content='symbols', content_rowid='id',
-    tokenize = 'porter unicode61 remove_diacritics 2'
-);
-
-CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
-    INSERT INTO symbols_fts(rowid, name, qualified, doc, signature)
-    VALUES (new.id, new.name, new.qualified, new.doc, new.signature);
-END;
-CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
-    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified, doc, signature)
-    VALUES('delete', old.id, old.name, old.qualified, old.doc, old.signature);
-END;
-CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
-    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified, doc, signature)
-    VALUES('delete', old.id, old.name, old.qualified, old.doc, old.signature);
-    INSERT INTO symbols_fts(rowid, name, qualified, doc, signature)
-    VALUES (new.id, new.name, new.qualified, new.doc, new.signature);
-END;
 
 -- Git layer.
 CREATE TABLE IF NOT EXISTS commits (
